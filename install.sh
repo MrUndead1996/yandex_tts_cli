@@ -22,7 +22,11 @@
 #   the installation aborts and everything is rolled back.
 # - Secrets are never printed or passed in command arguments.
 #
-# Usage: install.sh [--skills-root PATH]
+# Usage:
+#   install.sh [--skills-root PATH]   (from a cloned repository)
+#   curl -fsSL https://raw.githubusercontent.com/MrUndead1996/yandex_tts_cli/main/install.sh | bash
+#   wget -qO- https://raw.githubusercontent.com/MrUndead1996/yandex_tts_cli/main/install.sh | bash
+#
 #   --skills-root PATH  Explicitly request OpenClaw skill installation into
 #                       PATH via `tts skill_install PATH`. Without the flag the
 #                       script does not touch OpenClaw at all.
@@ -32,6 +36,8 @@ set -euo pipefail
 usage() {
 	echo "usage: $0 [--skills-root PATH]" >&2
 }
+
+ORIG_ARGS=("$@")
 
 SKILLS_ROOT=""
 SKILLS_ROOT_GIVEN=0
@@ -67,15 +73,46 @@ if [ "$SKILLS_ROOT_GIVEN" -eq 1 ] && [ -z "$SKILLS_ROOT" ]; then
 	exit 2
 fi
 
+log() { printf 'install.sh: %s\n' "$*"; }
+die() {
+	printf 'install.sh: error: %s\n' "$*" >&2
+	exit 1
+}
+
+need_cmd() {
+	command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
 # Resolve the repository root from the script location so the script works
 # from any cwd. $PWD is never assumed to be the repo.
-SCRIPT_SOURCE="${BASH_SOURCE[0]}"
-while [ -L "$SCRIPT_SOURCE" ]; do
-	SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
-	SCRIPT_SOURCE="$(readlink "$SCRIPT_SOURCE")"
-	[ "${SCRIPT_SOURCE#/}" != "$SCRIPT_SOURCE" ] || SCRIPT_SOURCE="$SCRIPT_DIR/$SCRIPT_SOURCE"
-done
-REPO_ROOT="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+#
+# When run via `curl ... | bash` BASH_SOURCE is empty — guard against that
+# under `set -u` by checking element existence, not its value.
+if [ "${BASH_SOURCE[0]+set}" = set ] && [ -n "${BASH_SOURCE[0]}" ]; then
+	SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+	while [ -L "$SCRIPT_SOURCE" ]; do
+		SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+		SCRIPT_SOURCE="$(readlink "$SCRIPT_SOURCE")"
+		[ "${SCRIPT_SOURCE#/}" != "$SCRIPT_SOURCE" ] || SCRIPT_SOURCE="$SCRIPT_DIR/$SCRIPT_SOURCE"
+	done
+	ROOT_CANDIDATE="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+else
+	# `curl ... | bash`: the script is read from stdin, no repo next to it.
+	ROOT_CANDIDATE=""
+fi
+REPO_ROOT="$ROOT_CANDIDATE"
+
+# Self-bootstrap: when run from a pipe, clone the repository into a private
+# temp directory and delegate the installation to the cloned install.sh.
+if [ -z "$REPO_ROOT" ] || [ ! -f "$REPO_ROOT/Cargo.toml" ]; then
+	need_cmd git
+	BOOTSTRAP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/yandex-tts-install-repo.XXXXXX")"
+	log "bootstrapping: cloning repository into $BOOTSTRAP_DIR"
+	git clone -q --depth 1 https://github.com/MrUndead1996/yandex_tts_cli.git "$BOOTSTRAP_DIR/yandex_tts_cli" ||
+		die "cannot clone repository"
+	# "$@" has already been consumed by the arg parsing above; pass a copy.
+	exec "$BOOTSTRAP_DIR/yandex_tts_cli/install.sh" "${ORIG_ARGS[@]}"
+fi
 
 BIN_DIR="$HOME/.local/bin"
 CONFIG_DIR="$HOME/.config/yandex-stationd"
@@ -93,16 +130,6 @@ old_rust_active=0
 old_rust_enabled=0
 old_python_active=0
 old_python_enabled=0
-
-log() { printf 'install.sh: %s\n' "$*"; }
-die() {
-	printf 'install.sh: error: %s\n' "$*" >&2
-	exit 1
-}
-
-need_cmd() {
-	command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
-}
 
 need_cmd cargo
 need_cmd systemctl
