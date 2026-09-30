@@ -494,8 +494,24 @@ fn unix_millis() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+/// Installs the process-level rustls crypto provider exactly once.
+///
+/// The daemon's dependency graph pulls rustls with **two** providers
+/// (`aws-lc-rs` transitively through `reqwest`/`hyper-rustls`, `ring`
+/// through `tokio-tungstenite`), so rustls cannot pick a default on its
+/// own and a plain `ClientConfig::builder()` would panic at the first
+/// real Station dial. We install `ring` deterministically; the first
+/// installer wins and later calls are no-ops.
+fn install_crypto_provider() {
+    static INSTALL_PROVIDER: std::sync::Once = std::sync::Once::new();
+    INSTALL_PROVIDER.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// rustls configuration for the Station WSS dial.
 fn station_tls_config(tls: GlagolTls) -> Result<rustls::ClientConfig, GlagolError> {
+    install_crypto_provider();
     match tls {
         GlagolTls::SystemRoots => {
             let mut roots = rustls::RootCertStore::empty();

@@ -285,7 +285,12 @@ async fn handle_client<S: Station>(
             Err(_) => Response::error("invalid_json"),
             Ok(request) => {
                 match timeout(request_timeout, dispatch(station.as_ref(), request)).await {
-                    Err(_) => Response::error("station_not_connected"),
+                    Err(_) => {
+                        if std::env::var_os("YANDEX_TTS_DIAGNOSTICS").is_some() {
+                            eprintln!("yandex-ttsd: request deadline reached");
+                        }
+                        Response::error("station_not_connected")
+                    }
                     Ok(Ok(response)) => response,
                     Ok(Err(StationError::NotConnected)) => Response::error("station_not_connected"),
                     Ok(Err(StationError::Internal(kind))) => {

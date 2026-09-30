@@ -1613,6 +1613,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "uuid",
  "yandex-tts-auth",
