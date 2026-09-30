@@ -1,10 +1,10 @@
 //! Station backend abstraction.
 //!
-//! Only the mock backend is functional in this migration slice: the real
-//! Glagol/WSS connection is этап 4 of docs/tasks.md and is intentionally not
-//! implemented. [`NotConnectedStation`] never reports success for `say`: the
-//! daemon answers `station_not_connected` and `ping` reports `connected:false`
-//! until a real station link exists.
+//! [`NotConnectedStation`] is the placeholder kept for tests that need a
+//! permanently offline backend; the daemon now uses the real
+//! [`crate::connection::ConnectionManager`] (see `daemon`). `say` must
+//! return `Ok` only after the station confirmed the command; there is no
+//! retry for commands with unknown outcome.
 
 use std::future::Future;
 

@@ -23,7 +23,7 @@ pub struct Station {
     pub platform: String,
 }
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum DiscoveryError {
     #[error("timeout must be positive")]
     InvalidTimeout,
