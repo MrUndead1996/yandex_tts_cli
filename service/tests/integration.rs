@@ -340,6 +340,63 @@ async fn pipelined_requests_in_single_write_are_all_answered() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn shutdown_lets_in_flight_request_finish() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use yandex_ttsd::station::{Station, StationError};
+
+    /// Station whose `say` takes a while: the request is in flight while
+    /// shutdown starts.
+    struct SlowStation {
+        delay: Duration,
+        in_flight: AtomicBool,
+    }
+
+    impl Station for SlowStation {
+        fn connected(&self) -> bool {
+            true
+        }
+
+        async fn say(&self, _text: &str) -> Result<(), StationError> {
+            self.in_flight.store(true, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            Ok(())
+        }
+    }
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("station.sock");
+    let station = Arc::new(SlowStation {
+        delay: Duration::from_millis(300),
+        in_flight: AtomicBool::new(false),
+    });
+    let mut server = Server::new(&path, Arc::clone(&station));
+    server.start().await.unwrap();
+    let stop = server.stop_handle();
+    let task = tokio::spawn(async move {
+        let _ = server.serve_forever().await;
+    });
+
+    // A request goes out and reaches the (slow) station.
+    let say = std::thread::spawn({
+        let path = path.clone();
+        move || {
+            let mut client = Client::connect(&path).unwrap();
+            client.request(&Request::Say("slow".into()))
+        }
+    });
+    while !station.in_flight.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Shutdown must not abort the handler: the drain waits for the request
+    // to finish and the client still receives its `ok` response.
+    stop.notify_one();
+    task.await.unwrap();
+    assert_eq!(say.join().unwrap(), Ok(Response::Ok));
+    assert!(!path.exists(), "socket must be removed after the drain");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn idle_client_connection_does_not_block_other_clients() {
     let daemon = start_daemon().await;
     let _idle = daemon.client();

@@ -3,7 +3,9 @@
 
 pub mod config;
 pub mod connection;
+pub mod daemon;
 pub mod discovery;
 pub mod glagol;
 pub mod server;
 pub mod station;
+pub mod testing;

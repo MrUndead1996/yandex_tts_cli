@@ -52,6 +52,9 @@ pub struct Server<S: Station> {
     listener: Option<UnixListener>,
     socket_identity: Option<(u64, u64)>,
     stop: Arc<tokio::sync::Notify>,
+    /// Cooperative stop flag for client handlers: idle handlers exit
+    /// immediately, in-flight requests are never interrupted mid-dispatch.
+    stopping: Arc<tokio::sync::watch::Sender<bool>>,
     clients: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -74,6 +77,7 @@ impl<S: Station> Server<S> {
             listener: None,
             socket_identity: None,
             stop: Arc::new(tokio::sync::Notify::new()),
+            stopping: Arc::new(tokio::sync::watch::channel(false).0),
             clients: Mutex::new(Vec::new()),
         }
     }
@@ -172,15 +176,16 @@ impl<S: Station> Server<S> {
                     return Ok(());
                 }
                 result = accept => match result {
-                    Ok((stream, _)) => {
-                        let station = Arc::clone(&self.station);
-                        let client_timeout = self.timeout;
-                        let max = self.max_message_size;
-                        let handle = tokio::spawn(async move {
-                            handle_client(stream, station, client_timeout, max).await;
-                        });
-                        self.clients.lock().unwrap().push(handle);
-                    }
+                Ok((stream, _)) => {
+                    let station = Arc::clone(&self.station);
+                    let client_timeout = self.timeout;
+                    let max = self.max_message_size;
+                    let stopping = self.stopping.subscribe();
+                    let handle = tokio::spawn(async move {
+                        handle_client(stream, station, client_timeout, max, stopping).await;
+                    });
+                    self.clients.lock().unwrap().push(handle);
+                }
                     Err(e) => return Err(e),
                 },
             }
@@ -192,16 +197,26 @@ impl<S: Station> Server<S> {
         Arc::clone(&self.stop)
     }
 
-    /// Stops accepting, disconnects clients and removes the socket file only
-    /// if it is still the one this server created.
+    /// Stops accepting, waits up to `timeout` for in-flight client requests
+    /// to finish (they are each already bounded by the request timeout, so
+    /// this drain is bounded too), aborts stragglers and removes the socket
+    /// file only if it is still the one this server created.
     pub async fn shutdown(&mut self) {
         self.listener = None;
-        let clients: Vec<_> = std::mem::take(&mut *self.clients.lock().unwrap());
-        for handle in &clients {
-            handle.abort();
-        }
-        for handle in clients {
-            let _ = handle.await;
+        // Tell every handler to stop reading new lines; in-flight requests
+        // finish and are then drained with a bounded budget below.
+        let _ = self.stopping.send(true);
+        let mut clients: Vec<_> = std::mem::take(&mut *self.clients.lock().unwrap());
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        for handle in &mut clients {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            // Poll the handler without consuming the handle, so stragglers
+            // can still be aborted after the drain budget. Each handle is
+            // awaited exactly once here.
+            if tokio::time::timeout(remaining, &mut *handle).await.is_err() {
+                handle.abort();
+                let _ = (&mut *handle).await;
+            }
         }
         if let Some((dev, ino)) = self.socket_identity.take()
             && let Ok(meta) = std::fs::symlink_metadata(&self.path)
@@ -230,26 +245,41 @@ async fn handle_client<S: Station>(
     station: Arc<S>,
     request_timeout: Duration,
     max_message_size: usize,
+    stopping: tokio::sync::watch::Receiver<bool>,
 ) {
     // Bytes past the first newline of a read are preserved so pipelined
     // requests on one connection are handled one by one.
     let mut reader = LineReader::new(stream);
+    let mut stopping = stopping;
     loop {
-        let line = match timeout(request_timeout, reader.next_line(max_message_size)).await {
-            Err(_) => {
-                respond(reader.stream_mut(), Response::error("timeout")).await;
-                break;
+        // Shutdown closes idle connections immediately (no line is being
+        // read); a request already being dispatched is never interrupted.
+        let stopped = async {
+            if *stopping.borrow_and_update() {
+                return;
             }
-            Ok(Err(ReadLineError::Io(err))) => {
-                log::debug!("Client connection failed: {err}");
-                break;
+            let _ = stopping.changed().await;
+        };
+        let line = tokio::select! {
+            _ = stopped => break,
+            line = timeout(request_timeout, reader.next_line(max_message_size)) => {
+                match line {
+                    Err(_) => {
+                        respond(reader.stream_mut(), Response::error("timeout")).await;
+                        break;
+                    }
+                    Ok(Err(ReadLineError::Io(err))) => {
+                        log::debug!("Client connection failed: {err}");
+                        break;
+                    }
+                    Ok(Err(ReadLineError::TooLarge)) => {
+                        respond(reader.stream_mut(), Response::error("message_too_large")).await;
+                        break;
+                    }
+                    Ok(Ok(None)) => break,
+                    Ok(Ok(Some(line))) => line,
+                }
             }
-            Ok(Err(ReadLineError::TooLarge)) => {
-                respond(reader.stream_mut(), Response::error("message_too_large")).await;
-                break;
-            }
-            Ok(Ok(None)) => break,
-            Ok(Ok(Some(line))) => line,
         };
         let response = match serde_json::from_slice::<Value>(&line) {
             Err(_) => Response::error("invalid_json"),
