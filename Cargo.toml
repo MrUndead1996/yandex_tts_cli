@@ -1,3 +1,3 @@
 [workspace]
-members = ["cli", "protocol", "service"]
+members = ["cli", "protocol", "service", "auth"]
 resolver = "3"

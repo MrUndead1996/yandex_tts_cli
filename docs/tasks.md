@@ -31,8 +31,9 @@
 
 ### 3. Авторизация и обнаружение станции
 
-- [ ] Перенести `auth.py`: обмен `YANDEX_X_TOKEN` на Music token и запрос `https://quasar.yandex.net/glagol/token` по `device_id`/`platform`, кеширование с учётом срока жизни, обновление после отклонения токена.
-- [ ] Обработать 401/403/429 (включая `Retry-After`) и сбои сети без утечки секретов в логах и ошибках. Тестировать на локальном HTTP mock.
+- [x] Перенести `auth.py`: обмен `YANDEX_X_TOKEN` на Music token и запрос `https://quasar.yandex.net/glagol/token` по `device_id`/`platform`, кеширование с учётом срока жизни, обновление после отклонения токена. (Крейт `auth` (`yandex-tts-auth`): async `YandexAuth` на `reqwest` (rustls), срок жизни из `expires_at`/`expires_in`/JWT `exp`, 60-секундный запас, `invalidate_device_token` и общий refresh для параллельных запросов. Встроенные `client_id`/`client_secret` Music OAuth удалены: `YandexAuth::new`/`with_options` принимают их явно из конфигурации daemon (`YANDEX_MUSIC_CLIENT_ID`/`YANDEX_MUSIC_CLIENT_SECRET`), встроенного фолбэка нет.)
+- [ ] Подключить `YandexAuth` в daemon: пока daemon остаётся заглушкой (`NotConnectedStation`), при его реализации нужно читать `YANDEX_MUSIC_CLIENT_ID`/`YANDEX_MUSIC_CLIENT_SECRET` из окружения (`EnvironmentFile` в systemd/.env), валидировать их на старте и не передавать в CLI. До этого этапа `.env.example` описывает целевые переменные, но фактической загрузки в daemon ещё нет.
+- [x] Обработать 401/403/429 (включая `Retry-After`) и сбои сети без утечки секретов в логах и ошибках. Тестировать на локальном HTTP mock. (`AuthError` с вариантами для 401/403/429/HTTP/сети; `Retry-After` как секунды или HTTP-date; тесты `auth/tests/auth.rs` на локальном tokio-сервере без сети и реальных токенов.)
 - [ ] Перенести `discovery.py`: `_yandexio._tcp.local.`, извлечение host/port/device_id/platform, выбор единственной станции либо по `YANDEX_DEVICE_ID`, ручная конфигурация всех четырёх полей.
 - [ ] Задокументировать загрузку переменных окружения и их значения по умолчанию; токен хранится только у daemon.
 
