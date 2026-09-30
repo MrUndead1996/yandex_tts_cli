@@ -615,7 +615,44 @@ impl<T: TokenSource, D: GlagolDialer> Station for ConnectionManager<T, D> {
         // an explicit Station-side failure is also not a success.
         match ConnectionManager::say(self, text).await {
             Ok(response) if say_response_accepted(&response) => Ok(()),
-            Ok(_) | Err(_) => Err(StationError::NotConnected),
+            Ok(response) => {
+                if std::env::var_os("YANDEX_TTS_DIAGNOSTICS").is_some() {
+                    let status = response
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .filter(|value| {
+                            value.len() <= 32
+                                && value
+                                    .bytes()
+                                    .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                        })
+                        .unwrap_or("missing_or_nonstandard");
+                    let error_code = match response.get("errorCode") {
+                        None => "absent",
+                        Some(value) if value.is_null() => "null",
+                        Some(value) if value == 0 || value == "0" => "zero",
+                        Some(_) => "nonzero_or_other",
+                    };
+                    eprintln!(
+                        "yandex-ttsd: say rejected: status={status} error_code={error_code} error_present={}",
+                        response.get("error").is_some_and(|v| !v.is_null())
+                    );
+                }
+                Err(StationError::NotConnected)
+            }
+            Err(error) => {
+                if std::env::var_os("YANDEX_TTS_DIAGNOSTICS").is_some() {
+                    let reason = match error {
+                        ManagerError::Closed => "closed",
+                        ManagerError::Timeout => "readiness_timeout",
+                        ManagerError::InvalidConfig => "invalid_config",
+                        ManagerError::Glagol(GlagolError::Timeout) => "response_timeout",
+                        ManagerError::Glagol(_) => "connection_failed",
+                    };
+                    eprintln!("yandex-ttsd: say failed: {reason}");
+                }
+                Err(StationError::NotConnected)
+            }
         }
     }
 }
@@ -629,9 +666,11 @@ pub(crate) fn say_response_accepted(response: &Value) -> bool {
     let Some(obj) = response.as_object() else {
         return false;
     };
-    // An explicit failure marker always wins, even when a `status` field
-    // also claims success.
-    if obj.contains_key("error") || obj.contains_key("errorCode") {
+    // An explicit error object rejects the command. Real Station responses
+    // may include a non-zero/non-numeric errorCode alongside status=SUCCESS;
+    // status is authoritative when present (the Python client accepted any
+    // correlated response, regardless of this metadata).
+    if obj.get("error").is_some_and(|value| !value.is_null()) {
         return false;
     }
     match obj.get("status") {
@@ -641,8 +680,10 @@ pub(crate) fn say_response_accepted(response: &Value) -> bool {
             status.as_str().map(str::to_ascii_lowercase).as_deref(),
             Some("ok" | "success" | "accepted" | "done" | "ack")
         ),
-        // No status and no failure marker: conservative accept.
-        None => true,
+        // Without a status, a non-zero errorCode is an explicit failure.
+        None => !obj
+            .get("errorCode")
+            .is_some_and(|value| !value.is_null() && value != 0 && value != "0"),
     }
 }
 
@@ -1197,16 +1238,14 @@ mod tests {
 
     #[test]
     fn say_response_failure_detection() {
-        // Explicit failure markers always fail, even with status ok.
+        // An explicit error object fails even with a success status.
         assert!(!say_response_accepted(
             &json!({"status": "ok", "error": "boom"})
-        ));
-        assert!(!say_response_accepted(
-            &json!({"status": "ok", "errorCode": 5})
         ));
         assert!(!say_response_accepted(&json!({"status": "error"})));
         assert!(!say_response_accepted(&json!({"error": "x"})));
         assert!(!say_response_accepted(&json!({"errorCode": 1})));
+        assert!(!say_response_accepted(&json!({"errorCode": "REJECTED"})));
         // Unknown or non-string status is not a confirmation.
         assert!(!say_response_accepted(&json!({"status": "pending"})));
         assert!(!say_response_accepted(&json!({"status": 3})));
@@ -1214,6 +1253,15 @@ mod tests {
         // Correlated answers without failure markers count as accepted.
         assert!(say_response_accepted(&json!({"status": "ok"})));
         assert!(say_response_accepted(&json!({"status": "Success"})));
+        assert!(say_response_accepted(
+            &json!({"status": "SUCCESS", "errorCode": 0})
+        ));
+        assert!(say_response_accepted(
+            &json!({"status": "SUCCESS", "errorCode": "OTHER"})
+        ));
+        assert!(say_response_accepted(
+            &json!({"status": "SUCCESS", "errorCode": null, "error": null})
+        ));
         assert!(say_response_accepted(&json!({"result": "done"})));
         assert!(say_response_accepted(&json!({})));
     }

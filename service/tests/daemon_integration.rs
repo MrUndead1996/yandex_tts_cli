@@ -219,6 +219,26 @@ async fn station_failure_with_ok_status_is_not_success() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn station_success_with_error_code_metadata_is_reported_as_success() {
+    let daemon = start_daemon().await;
+    wait_connected(&daemon.manager).await;
+
+    let say = {
+        let mut client = daemon.client();
+        std::thread::spawn(move || client.request(&Request::Say("hi".into())))
+    };
+    answer_say(
+        &daemon.conn,
+        json!({"status": "SUCCESS", "errorCode": "OTHER"}),
+    )
+    .await;
+
+    let response = say.join().expect("say thread").expect("completed");
+    assert_eq!(response, Response::Ok);
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn say_before_connection_reports_station_not_connected() {
     // The dialer always fails: the manager stays disconnected but started.
     let dialer = MockDialer::new();
