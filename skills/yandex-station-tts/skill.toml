@@ -1,0 +1,16 @@
+# Манифест скилла OpenClaw. Обрабатывается инсталлятором
+# (`tts skill_install <SKILLS_ROOT>`), не самим OpenClaw: агент читает
+# только SKILL.md рядом с этим файлом.
+schema = "openclaw-skill/v1"
+
+[skill]
+name = "yandex-station-tts"
+version = "0.1.0"
+description = "Озвучивай текст на Яндекс Станции через локальный CLI только по явной просьбе пользователя сказать или произнести его вслух."
+
+[install]
+# Файлы, которые инсталлятор копирует в <SKILLS_ROOT>/yandex-station-tts/.
+# Плейсхолдер {{TTS_BIN}} в SKILL.md заменяется на shell-экранированный
+# абсолютный путь к установленному бинарнику CLI.
+files = ["SKILL.md", "skill.toml"]
+template = "SKILL.md"
