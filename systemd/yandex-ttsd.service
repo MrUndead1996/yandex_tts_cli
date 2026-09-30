@@ -1,0 +1,19 @@
+[Unit]
+Description=Yandex Station TTS daemon (Rust)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/yandex-ttsd
+EnvironmentFile=%h/.config/yandex-stationd/.env
+Restart=on-failure
+RestartSec=2s
+# Graceful shutdown on SIGTERM: the daemon stops accepting, drains in-flight
+# requests (bounded by the 10 s request timeout), removes its socket and
+# closes the station connection. KillSignal=SIGTERM is the default.
+TimeoutStopSec=15s
+KillMode=mixed
+
+[Install]
+WantedBy=default.target
