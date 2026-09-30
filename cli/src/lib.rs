@@ -19,7 +19,7 @@ use yandex_tts_protocol::{Client, Request, socket_path};
 /// executable path at install time. Embedded at compile time so the binary
 /// install does not depend on a repo checkout.
 const SKILL_TEMPLATE: &str = include_str!("../../skills/yandex-station-tts/SKILL.md");
-const SKILL_MANIFEST: &str = include_str!("../../skills/yandex-station-tts/skill.toml");
+const SKILL_MANIFEST: &str = include_str!("../../skills/yandex-station-tts/SKILL.toml");
 const SKILL_DIR_NAME: &str = "yandex-station-tts";
 const TEMPLATE_PLACEHOLDER: &str = "{{TTS_BIN}}";
 
@@ -178,9 +178,9 @@ fn install_skill_into(root: &Path, cli: &Path) -> Result<(), String> {
     let rendered = SKILL_TEMPLATE.replace(TEMPLATE_PLACEHOLDER, &cli_escaped);
 
     write_owned_file(&skill_dir.join("SKILL.md"), &rendered)?;
-    write_owned_file(&skill_dir.join("skill.toml"), SKILL_MANIFEST)?;
+    write_owned_file(&skill_dir.join("SKILL.toml"), SKILL_MANIFEST)?;
     println!(
-        "installed {} (SKILL.md, skill.toml) with CLI {}",
+        "installed {} (SKILL.md, SKILL.toml) with CLI {}",
         skill_dir.display(),
         cli_path.display()
     );

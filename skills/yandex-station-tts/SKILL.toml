@@ -12,5 +12,5 @@ description = "Озвучивай текст на Яндекс Станции ч
 # Файлы, которые инсталлятор копирует в <SKILLS_ROOT>/yandex-station-tts/.
 # Плейсхолдер {{TTS_BIN}} в SKILL.md заменяется на shell-экранированный
 # абсолютный путь к установленному бинарнику CLI.
-files = ["SKILL.md", "skill.toml"]
+files = ["SKILL.md", "SKILL.toml"]
 template = "SKILL.md"

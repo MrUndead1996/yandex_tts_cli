@@ -34,7 +34,7 @@ fn skill_install_writes_manifest_and_rendered_skill_into_root() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let manifest = std::fs::read_to_string(skill_dir(root.path()).join("skill.toml")).unwrap();
+    let manifest = std::fs::read_to_string(skill_dir(root.path()).join("SKILL.toml")).unwrap();
     assert!(manifest.contains("name = \"yandex-station-tts\""));
     assert!(manifest.contains("version = \"0.1.0\""));
     assert!(manifest.contains("template = \"SKILL.md\""));
@@ -74,7 +74,7 @@ fn skill_install_survives_root_path_with_spaces_and_apostrophe() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(skill_dir(&root).join("SKILL.md").is_file());
-    assert!(skill_dir(&root).join("skill.toml").is_file());
+    assert!(skill_dir(&root).join("SKILL.toml").is_file());
     let skill = read_skill_md(&root);
     let exe = PathBuf::from(env!("CARGO_BIN_EXE_yandex-tts"))
         .canonicalize()
@@ -107,7 +107,7 @@ fn skill_install_reinstall_updates_owned_files_and_preserves_unrelated() {
     std::fs::write(&keep_note, "user data").unwrap();
 
     // Modify the owned manifest so reinstall must overwrite it.
-    let manifest_path = skill_dir(root.path()).join("skill.toml");
+    let manifest_path = skill_dir(root.path()).join("SKILL.toml");
     std::fs::write(&manifest_path, "# clobbered").unwrap();
 
     assert!(run_skill_install(root.path()).status.success());
