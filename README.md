@@ -1,6 +1,8 @@
 # Yandex Station TTS
 
-Rust workspace для переноса локального TTS daemon из `~/nanobot_workspace/yandex_tts`. Реализованы первый и второй этапы (локальный Unix socket API и CLI), перенос `auth.py` (крейт `auth/`), `discovery.py` (mDNS-обнаружение станции и ручная конфигурация, `service::discovery`), `glagol.py` (клиент Glagol WSS, `service::glagol`) и `connection.py` (connection manager с фоновым восстановлением, `service::connection`). Daemon (`yandex-ttsd`) теперь использует реальный `ConnectionManager`: креды читаются из окружения на старте, станция определяется вручную или по mDNS, `ping` отражает фактическую готовность соединения, а `say` возвращает успех только после коррелированного ответа станции. systemd user unit перенесён (`systemd/yandex-ttsd.service`, этап 5 в части unit; smoke test с реальной станцией остаётся ручной проверкой). Python в рантайме не используется.
+Rust workspace для переноса локального TTS daemon из `~/nanobot_workspace/yandex_tts`. Реализованы первый и второй этапы (локальный Unix socket API и CLI), перенос `auth.py` (крейт `auth/`), `discovery.py` (mDNS-обнаружение станции и ручная конфигурация, `service::discovery`), `glagol.py` (клиент Glagol WSS, `service::glagol`) и `connection.py` (connection manager с фоновым восстановлением, `service::connection`). Daemon (`yandex-ttsd`) теперь использует реальный `ConnectionManager`: креды читаются из окружения на старте, станция определяется вручную или по mDNS, `ping` отражает фактическую готовность соединения, а `say` возвращает успех только после коррелированного ответа станции. systemd user unit перенесён (`systemd/yandex-ttsd.service`, этап 5). Python в рантайме не используется.
+
+**Статус развёртывания** (claw.mrundead.org, проверено): старый Python-сервис/unit/инсталляция удалены, Rust `yandex-ttsd` user-сервис активен, `enabled` и переживает перезапуск; `yandex-tts ping` → `connected:true`; сокет и `~/.config/yandex-stationd/.env` с правами `0600`; Python-процессов нет. Полный live smoke — `yandex-tts say` с exit 0 после финального фикса парсинга ответа — пока не проведён (станция озвучивала тест с до-фиксовым ответом).
 
 ## Компоненты
 
@@ -32,7 +34,7 @@ systemd-analyze verify systemd/yandex-ttsd.service
 
 ### Шаг 1. Остановить старый Python daemon (для миграции)
 
-Старый Python daemon и новый Rust daemon слушают **один и тот же путь сокета** — одновременно работать они не могут, поэтому старый сервис останавливается **до** любых действий с новым unit. Также это защищает существующие креды от случайной перезаписи на следующем шаге:
+Старый Python daemon и новый Rust daemon слушают **один и тот же путь сокета** — одновременно работать они не могут, поэтому старый сервис останавливается **до** любых действий с новым unit. Также это защищает существующие креды от случайной перезаписи на следующем шаге. На claw.mrundead.org это уже выполнено: Python-сервис, unit и инсталляция удалены.
 
 ```bash
 systemctl --user disable --now yandex-stationd   # старый Python unit (имя может отличаться)
@@ -87,6 +89,8 @@ journalctl --user -u yandex-ttsd -f
 При переустановке unit после правки `systemd/yandex-ttsd.service` повторите только `install -m644 …` + `daemon-reload` + `systemctl --user restart yandex-ttsd`; `.env` при этом не затрагивается.
 
 ### Откат на Python-вариант
+
+Примечание: на claw.mrundead.org Python-вариант удалён — раздел актуален только для машин, где он ещё установлен.
 
 ```bash
 systemctl --user disable --now yandex-ttsd
