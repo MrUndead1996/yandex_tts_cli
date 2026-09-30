@@ -3,5 +3,6 @@
 
 pub mod config;
 pub mod discovery;
+pub mod glagol;
 pub mod server;
 pub mod station;
