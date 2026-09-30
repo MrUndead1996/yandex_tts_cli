@@ -36,6 +36,8 @@ cargo test --workspace
 
 Покрыты протокол (валидация, лимиты, ошибки), многократные запросы, конкурентные клиенты, права сокета, замена stale socket, shutdown и интеграция CLI-пути с сервером на mock-станции — без сети и Python.
 
+CI: GitHub Actions запускает `cargo test --workspace --locked` на каждый pull request (`.github/workflows/tests.yml`).
+
 ## systemd
 
 Пока не перенесён (этап 5 в docs/tasks.md).
