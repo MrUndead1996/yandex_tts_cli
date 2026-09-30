@@ -1,32 +1,44 @@
 # Yandex Station TTS
 
-Rust workspace для переноса локального TTS daemon из `~/nanobot_workspace/yandex_tts`. Сейчас создан каркас проекта; бинарники пока завершаются с ошибкой и не отправляют команды на станцию. План реализации — [docs/tasks.md](docs/tasks.md).
+Rust workspace для переноса локального TTS daemon из `~/nanobot_workspace/yandex_tts`. Реализован первый этап: локальный Unix socket API (`ping`/`say`, JSON Lines) и CLI. Связь с реальной станцией (авторизация, Glagol WSS, mDNS) ещё не перенесена — до её появления `ping` всегда отвечает `connected:false`, а `say` — ошибкой `station_not_connected`. План — [docs/tasks.md](docs/tasks.md). Python в рантайме не используется.
 
 ## Компоненты
 
-- `service/` — будущий `yandex-ttsd`: авторизация, Glagol WSS, локальный Unix socket и user service systemd.
-- `cli/` — будущий `yandex-tts`: отправка команд daemon без доступа к токенам.
-- `.env.example` — шаблон настроек daemon; реальные значения не хранить в репозитории.
+- `protocol/` — общий контракт: путь сокета, формат запросов/ответов, блокирующий клиент.
+- `service/` — `yandex-ttsd`: Unix socket сервер (JSON Lines, лимит строки 65536 байт, таймаут 10 с, права `0600`, удаление только собственного stale socket).
+- `cli/` — `yandex-tts`: отправка команд daemon без доступа к токенам.
 
-Проверка каркаса: `cargo check --workspace`. После реализации: `cargo build --release --workspace`.
-
-## Планируемое использование
+## Сборка
 
 ```bash
-yandex-tts say "Свет на кухне выключен"
+cargo build --release --workspace
 ```
 
-CLI будет передавать запрос запущенному сервису по Unix socket, который отправит TTS на станцию.
+## Использование
+
+```bash
+# терминал 1
+./target/release/yandex-ttsd
+
+# терминал 2
+./target/release/yandex-tts ping     # {"connected":false,"ok":true} — станции нет
+./target/release/yandex-tts say "Привет"
+# yandex-tts: daemon error: station_not_connected  (код выхода 1)
+```
+
+Путь сокета: `SOCKET_PATH`, иначе `$XDG_RUNTIME_DIR/yandex-stationd.sock`, иначе `/run/user/<uid>/yandex-stationd.sock`. `say` возвращает успех только после подтверждения команды станцией; пока бэкенд-заглушка (`NotConnectedStation`) активна, успеха не бывает.
+
+## Тесты
+
+```bash
+cargo test --workspace
+```
+
+Покрыты протокол (валидация, лимиты, ошибки), многократные запросы, конкурентные клиенты, права сокета, замена stale socket, shutdown и интеграция CLI-пути с сервером на mock-станции — без сети и Python.
 
 ## systemd
 
-```bash
-systemctl --user status yandex-ttsd
-systemctl --user restart yandex-ttsd
-journalctl --user -u yandex-ttsd -f
-```
-
-После реализации сервис будет хранить состояние соединения независимо от вызывающих его приложений.
+Пока не перенесён (этап 5 в docs/tasks.md).
 
 ## Назначение
 

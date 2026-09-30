@@ -5,3 +5,11 @@ edition = "2024"
 publish = false
 
 [dependencies]
+libc = "0.2"
+log = "0.4"
+serde_json = "1.0"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "io-util"] }
+yandex-tts-protocol = { path = "../protocol" }
+
+[dev-dependencies]
+tempfile = "3"
