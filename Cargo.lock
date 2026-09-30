@@ -1615,6 +1615,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "uuid",
+ "yandex-tts-auth",
  "yandex-tts-protocol",
 ]
 

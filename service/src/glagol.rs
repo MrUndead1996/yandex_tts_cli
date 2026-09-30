@@ -285,27 +285,7 @@ impl GlagolClient {
     /// played; the daemon must still validate the response before reporting
     /// success to its own clients (and remains a placeholder for now).
     pub async fn say(&self, phrase: &str) -> Result<Value, GlagolError> {
-        self.send(json!({
-            "command": "serverAction",
-            "serverActionEventPayload": {
-                "type": "server_action",
-                "name": "update_form",
-                "payload": {
-                    "form_update": {
-                        "name": "personal_assistant.scenarios.quasar.iot.repeat_phrase",
-                        "slots": [
-                            {
-                                "type": "string",
-                                "name": "phrase_to_repeat",
-                                "value": phrase,
-                            }
-                        ],
-                    },
-                    "resubmit": true,
-                },
-            },
-        }))
-        .await
+        self.send(say_payload(phrase)).await
     }
 
     /// Close the connection and fail all requests still awaiting responses.
@@ -378,6 +358,31 @@ impl GlagolClient {
             reader(shared, ws, &mut rx, generation).await;
         });
     }
+}
+
+/// The `serverAction` → `update_form` → `repeat_phrase` payload sent by
+/// [`GlagolClient::say`]; shared with the connection manager's trait.
+pub(crate) fn say_payload(phrase: &str) -> Value {
+    json!({
+        "command": "serverAction",
+        "serverActionEventPayload": {
+            "type": "server_action",
+            "name": "update_form",
+            "payload": {
+                "form_update": {
+                    "name": "personal_assistant.scenarios.quasar.iot.repeat_phrase",
+                    "slots": [
+                        {
+                            "type": "string",
+                            "name": "phrase_to_repeat",
+                            "value": phrase,
+                        }
+                    ],
+                },
+                "resubmit": true,
+            },
+        },
+    })
 }
 
 /// Background task: forwards outgoing messages, answers heartbeat pings and

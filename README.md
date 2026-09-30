@@ -1,11 +1,11 @@
 # Yandex Station TTS
 
-Rust workspace для переноса локального TTS daemon из `~/nanobot_workspace/yandex_tts`. Реализованы первый и второй этапы (локальный Unix socket API и CLI), перенос `auth.py` (крейт `auth/`), `discovery.py` (mDNS-обнаружение станции и ручная конфигурация, `service::discovery`) и `glagol.py` (клиент Glagol WSS, `service::glagol`). Клиент Glagol пока не подключён к daemon: до появления connection manager (этап 4 в docs/tasks.md) `ping` отвечает `connected:false`, а `say` — ошибкой `station_not_connected`. Python в рантайме не используется.
+Rust workspace для переноса локального TTS daemon из `~/nanobot_workspace/yandex_tts`. Реализованы первый и второй этапы (локальный Unix socket API и CLI), перенос `auth.py` (крейт `auth/`), `discovery.py` (mDNS-обнаружение станции и ручная конфигурация, `service::discovery`), `glagol.py` (клиент Glagol WSS, `service::glagol`) и `connection.py` (connection manager с фоновым восстановлением, `service::connection`). Connection manager и Glagol-клиент пока не подключены к daemon: до подключения на этапе 4 `ping` отвечает `connected:false`, а `say` — ошибкой `station_not_connected`. Python в рантайме не используется.
 
 ## Компоненты
 
 - `protocol/` — общий контракт: путь сокета, формат запросов/ответов, блокирующий клиент.
-- `service/` — `yandex-ttsd`: Unix socket сервер (JSON Lines, лимит строки 65536 байт, таймаут 10 с, права `0600`, удаление только собственного stale socket), mDNS-обнаружение станции (`discovery`), клиент Glagol WSS (`glagol`).
+- `service/` — `yandex-ttsd`: Unix socket сервер (JSON Lines, лимит строки 65536 байт, таймаут 10 с, права `0600`, удаление только собственного stale socket), mDNS-обнаружение станции (`discovery`), клиент Glagol WSS (`glagol`), connection manager с фоновым reconnect/token refresh (`connection`).
 - `cli/` — `yandex-tts`: отправка команд daemon без доступа к токенам.
 
 ## Сборка
@@ -53,7 +53,16 @@ cargo build --release --workspace
 - Закрытие соединения с кодом 4000 различается особо: `GlagolError::InvalidToken` (станция отвергла device token), прочие закрытия — `GlagolError::Closed`.
 - TLS (`GlagolTls`) касается только WSS станции и никогда — HTTP авторизации Яндекса: `SystemRoots` проверяет сертификат по системным корням; `AcceptSelfSigned` — явный opt-in для локальной станции с самоподписанным сертификатом.
 - Ошибки и `Debug` не содержат device token, текстов запросов и TTS.
-- Reconnect, обновление токена и интеграция с daemon не реализованы (этап 4).
+
+## Connection manager (библиотечный API)
+
+Модуль `service::connection` — порт `connection.py`: `ConnectionManager` владеет device token и Glagol-клиентом и держит соединение доступным при сетевых и токен-сбоях. Фоновое восстановление стартует без живой сети; reconnect с экспоненциальным backoff (удвоение с капом) и джиттером до 20% (инъекционен для тестов); `Retry-After` от auth 429 соблюдается; close code 4000 сбрасывает device token и переподключается с новым; периодический рефреш-зонд замечает ротацию токена. Команда с неизвестным исходом (обрыв/таймаут при отправке) возвращается вызывающему как ошибка и лишь помечает соединение на пересборку — автоматической повторной отправки нет. Закрытие (`close`) останавливает retry-цикл, закрывает сокет и будит всех ждущих; `send_within`/`say_within` позволяют daemon ограничить ожидание готовности таймаутом запроса.
+
+- Auth и Glagol-транспорт инъекционны: трейты `TokenSource` и `GlagolDialer`; прод-биндинги — `YandexAuth` и `GlagolWsDialer` над `GlagolClient`. Тесты используют mock auth и in-memory mock-соединение — без сети и реальной станции.
+- `ConnectionManager` реализует `service::station::Station` (`connected`/`say`), так что daemon сможет использовать его напрямую; подключение к `main`/конфигурации пока не сделано (этап 4).
+- `Debug` и ошибки не содержат device token и TTS-текста.
+
+- Интеграция manager (и `GlagolClient`) с daemon не выполнена: `main`/конфигурация/systemd не тронуты (этапы 4–5).
 
 ## Тесты
 
@@ -61,7 +70,7 @@ cargo build --release --workspace
 cargo test --workspace
 ```
 
-Покрыты протокол (валидация, лимиты, ошибки), многократные запросы, конкурентные клиенты, права сокета, замена stale socket, shutdown и интеграция CLI-пути с сервером на mock-станции. Клиент Glagol проверяется на mock WebSocket через in-memory duplex (конкурентные запросы, ответы не по порядку, таймаут, закрытие, код 4000, malformed/unmatched ответы, heartbeat, конверт `say`) — без сети, реальной станции и Python.
+Покрыты протокол (валидация, лимиты, ошибки), многократные запросы, конкурентные клиенты, права сокета, замена stale socket, shutdown и интеграция CLI-пути с сервером на mock-станции. Клиент Glagol проверяется на mock WebSocket через in-memory duplex (конкурентные запросы, ответы не по порядку, таймаут, закрытие, код 4000, malformed/unmatched ответы, heartbeat, конверт `say`) — без сети, реальной станции и Python. Connection manager проверяется на mock auth и in-memory mock-соединении (подключение, обрыв/восстановление, 4000→invalidate→новый токен, ротация токена, `Retry-After`, отсутствие повторной отправки, backoff/джиттер-политика, пробуждение ждущих при закрытии, отсутствие токена в `Debug`).
 
 CI: GitHub Actions запускает `cargo test --workspace --locked` на каждый pull request (`.github/workflows/tests.yml`).
 
