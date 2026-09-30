@@ -5,12 +5,18 @@ edition = "2024"
 publish = false
 
 [dependencies]
+futures-util = "0.3.34"
 libc = "0.2"
 log = "0.4"
 mdns-sd = "0.13"
+rustls = "0.23.45"
+rustls-native-certs = "0.8.4"
+rustls-pki-types = "1.15.1"
 serde_json = "1.0"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "io-util"] }
+tokio-tungstenite = { version = "0.30.0", features = ["__rustls-tls", "rustls-tls-native-roots"] }
+uuid = { version = "1.26.1", features = ["v4"] }
 yandex-tts-protocol = { path = "../protocol" }
 
 [dev-dependencies]
