@@ -2,5 +2,6 @@
 //! server against a mock station.
 
 pub mod config;
+pub mod discovery;
 pub mod server;
 pub mod station;
