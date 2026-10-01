@@ -23,13 +23,17 @@ const SKILL_MANIFEST: &str = include_str!("../../skills/yandex-station-tts/SKILL
 const SKILL_DIR_NAME: &str = "yandex-station-tts";
 const TEMPLATE_PLACEHOLDER: &str = "{{TTS_BIN}}";
 
-const USAGE: &str = "usage: yandex-tts <say <text> | ping> | tts skill_install <PATH>";
+const USAGE: &str = "usage: yandex-tts <say <text> | ping | --version> | tts skill_install <PATH>";
+
+/// Crate/package version reported by `--version` (no daemon contact).
+const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
     Say(String),
     Ping,
     SkillInstall(PathBuf),
+    Version,
 }
 
 fn parse_args(args: &[String]) -> Result<Command, String> {
@@ -48,6 +52,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
         "skill_install" if args.len() == 2 && !args[1].is_empty() => {
             Ok(Command::SkillInstall(PathBuf::from(&args[1])))
         }
+        "--version" | "-V" if args.len() == 1 => Ok(Command::Version),
         _ => Err(USAGE.to_owned()),
     }
 }
@@ -58,6 +63,12 @@ fn run(command: &Command, socket: &Path) -> Result<(), String> {
         Command::Ping => Request::Ping,
         // skill_install is dispatched in `main` and never reaches the socket.
         Command::SkillInstall(root) => return install_skill_cmd(root),
+        // --version is purely local: print the package version, never
+        // connect to (or resolve) the daemon socket.
+        Command::Version => {
+            println!("yandex-tts {PKG_VERSION}");
+            return Ok(());
+        }
     };
     let mut client = Client::connect(socket)
         .map_err(|e| format!("cannot connect to daemon socket {}: {e}", socket.display()))?;

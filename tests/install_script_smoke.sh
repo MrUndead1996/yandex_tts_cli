@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# Smoke tests for install.sh using temporary sandboxes and stubs for
-# cargo/systemctl/install. Never touches real services, real ~/.config or the
-# real cargo build: only install.sh, .env.example and the unit file are copied
-# into a temp dir; all external effects are faked and every sandbox is tracked
-# and removed exactly. Run: bash tests/install_script_smoke.sh
+# Offline smoke/regression tests for install.sh.
+#
+# Fully self-contained: no network, no real services, no real ~/.config, no
+# real cargo build. Every external effect is stubbed inside a per-test
+# sandbox:
+#   - curl serves a fake "latest release" (JSON with tag, architecture
+#     tarballs, sha256 checksum files, raw unit and .env.example);
+#   - uname reports a controlled architecture;
+#   - systemctl is a state machine; cargo/install/sleep are stubs;
+#   - "released" binaries are fake scripts supporting --version, ping and
+#     skill_install.
+# All sandboxes are tracked and removed exactly. Run:
+#   bash tests/install_script_smoke.sh
 
 set -u
 
@@ -52,20 +60,109 @@ make_sandbox() {
 	SANDBOXES+=("$SBX")
 	SRC="$SBX/src"           # minimal copy of the repo
 	HOME_DIR="$SBX/home"     # fake $HOME
-	STUB_BIN="$SBX/stub-bin" # stubs for cargo/systemctl/install
+	STUB_BIN="$SBX/stub-bin" # stubs for curl/uname/cargo/systemctl/install/sleep
+	REL="$SBX/release"       # fake release assets served by the curl stub
 	EVENTS="$SBX/events.log" # single shared chronological stub log
 	BINLOG="$SBX/binaries.log"
 	: >"$EVENTS"
 	: >"$BINLOG"
-	mkdir -p "$SRC/systemd" "$HOME_DIR" "$STUB_BIN"
+	mkdir -p "$SRC/systemd" "$HOME_DIR" "$STUB_BIN" "$REL"
 	cp "$REPO_ROOT/install.sh" "$SRC/install.sh"
 	cp "$REPO_ROOT/.env.example" "$SRC/.env.example"
 	cp "$REPO_ROOT/systemd/yandex-ttsd.service" "$SRC/systemd/yandex-ttsd.service"
+	# Mark the copy as a repository root (source mode must clone, never fall
+	# back to a network clone).
+	cp "$REPO_ROOT/Cargo.toml" "$SRC/Cargo.toml"
+	cp "$REPO_ROOT/Cargo.lock" "$SRC/Cargo.lock"
+}
+
+# A fake released/binary script: answers --version, ping, skill_install;
+# logs every invocation to the shared binary log. $1=path $2=version string.
+make_fake_binary() {
+	local p="$1" v="$2"
+	cat >"$p" <<EOF
+#!/bin/sh
+echo "\$(basename "\$0") \$*" >> $(printf %q "$BINLOG")
+case "\$1" in
+  --version) echo "yandex-tts $v"; exit 0 ;;
+  ping) [ "\${FAIL_PING:-0}" = 1 ] && exit 1; exit 0 ;;
+  skill_install) [ "\${FAIL_SKILL:-0}" = 1 ] && exit 1; exit 0 ;;
+esac
+exit 0
+EOF
+	chmod +x "$p"
+}
+
+# Build the fake release assets for both supported architectures.
+#   FAKE_RELEASE_VERSION  release tag (default 1.2.3)
+write_release_assets() {
+	local ver="${FAKE_RELEASE_VERSION:-1.2.3}"
+	local tgt dir b
+	echo "{\"tag_name\": \"v$ver\"}" >"$REL/release.json"
+	for tgt in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+		dir="$REL/pkg/yandex-tts-$ver-$tgt"
+		mkdir -p "$dir"
+		for b in yandex-ttsd yandex-tts; do
+			make_fake_binary "$dir/$b" "$ver"
+			printf '# target=%s\n' "$tgt" >>"$dir/$b"
+		done
+		tar -C "$REL/pkg" -czf "$REL/yandex-tts-$ver-$tgt.tar.gz" "yandex-tts-$ver-$tgt"
+		(cd "$REL" && sha256sum "yandex-tts-$ver-$tgt.tar.gz" >"checksums-$tgt.txt")
+	done
+	rm -rf "$REL/pkg"
 }
 
 write_stubs() {
-	# cargo: "build" -> create fake binaries in the copied repo's target dir;
-	# logs to the shared chronological log.
+	write_release_assets
+
+	# uname: controlled architecture (FAKE_ARCH, default x86_64), always Linux.
+	cat >"$STUB_BIN/uname" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+-s) echo Linux ;;
+-m) echo "${FAKE_ARCH:-x86_64}" ;;
+*) echo Linux ;;
+esac
+EOF
+
+	# curl: serves the fake release from $REL; logs every call. Env switches:
+	#   TAMPER_CHECKSUM=1  corrupt the served checksum file
+	cat >"$STUB_BIN/curl" <<EOF
+#!/usr/bin/env bash
+EVENTS="$(printf %q "$EVENTS")"
+REL="$(printf %q "$REL")"
+SRC="$(printf %q "$SRC")"
+echo "curl \$*" >> "\$EVENTS"
+out=""
+url=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+  -o) out="\$2"; shift 2 ;;
+  -*) shift ;;
+  *) url="\$1"; shift ;;
+  esac
+done
+[ -n "\$url" ] || exit 1
+serve() {
+  if [ "\${TAMPER_CHECKSUM:-0}" = 1 ] && [ "\$1" != "\${1##*/checksums-}" ]; then
+    awk '{print "0000000000000000000000000000000000000000000000000000000000000000  " \$2}' "\$1"
+  else
+    cat "\$1"
+  fi
+}
+case "\$url" in
+  */releases/latest) file="\$REL/release.json" ;;
+  */releases/download/*) file="\$REL/\${url##*/}" ;;
+  */install.sh) file="\$SRC/install.sh" ;;
+  */yandex-ttsd.service) file="\$SRC/systemd/yandex-ttsd.service" ;;
+  */.env.example) file="\$SRC/.env.example" ;;
+  *) exit 1 ;;
+esac
+[ -f "\$file" ] || exit 1
+if [ -n "\$out" ]; then serve "\$file" >"\$out"; else serve "\$file"; fi
+EOF
+
+	# cargo: "build" -> fake binaries in the copied repo's target dir.
 	cat >"$STUB_BIN/cargo" <<EOF
 #!/usr/bin/env bash
 echo "cargo \$*" >> "$(printf %q "$EVENTS")"
@@ -79,12 +176,14 @@ if [ "\$1" = build ]; then
 fi
 exit 1
 EOF
+
 	# install: forward to the real install binary, log to shared log.
 	cat >"$STUB_BIN/install" <<EOF
 #!/usr/bin/env bash
 echo "install \$*" >> "$(printf %q "$EVENTS")"
 exec /usr/bin/install "\$@"
 EOF
+
 	# systemctl: state machine in $SBX/systemctl-state, actions in shared log.
 	cat >"$STUB_BIN/systemctl" <<EOF
 #!/usr/bin/env bash
@@ -130,6 +229,7 @@ case "\$cmd" in
 esac
 exit 1
 EOF
+
 	# sleep stub (avoid real waits); journalctl is intentionally NOT stubbed:
 	# install.sh must never call it, only print the command to run manually.
 	printf '#!/bin/sh\nexit 0\n' >"$STUB_BIN/sleep"
@@ -164,14 +264,23 @@ mark_old_python_active() {
 	echo yes >"$SBX/systemctl-state/yandex-stationd.service.active"
 }
 
-mark_new_rust_active() { # existing Rust service: active, enabled, with binaries and unit
+# Existing Rust install: active+enabled service, old binaries, old unit whose
+# ExecStart points at the current binary path (a "consistent" install).
+#   FAKE_OLD_VERSION  version reported by `yandex-tts --version` (default
+#                     0.9.0, i.e. older than the fake release)
+mark_new_rust_active() {
+	local ver="${FAKE_OLD_VERSION:-0.9.0}"
 	mkdir -p "$SBX/systemctl-state" "$HOME_DIR/.local/bin" "$HOME_DIR/.config/systemd/user"
 	echo yes >"$SBX/systemctl-state/yandex-ttsd.service.active"
 	echo yes >"$SBX/systemctl-state/yandex-ttsd.service.enabled"
-	printf 'old-ttsd-binary' >"$HOME_DIR/.local/bin/yandex-ttsd"
-	printf 'old-tts-binary' >"$HOME_DIR/.local/bin/yandex-tts"
-	printf 'old-tts-alias' >"$HOME_DIR/.local/bin/tts"
-	printf 'old-unit-content\n' >"$HOME_DIR/.config/systemd/user/yandex-ttsd.service"
+	make_fake_binary "$HOME_DIR/.local/bin/yandex-ttsd" "$ver"
+	make_fake_binary "$HOME_DIR/.local/bin/yandex-tts" "$ver"
+	make_fake_binary "$HOME_DIR/.local/bin/tts" "$ver"
+	{
+		printf '[Unit]\nDescription=old\n[Service]\n'
+		printf 'ExecStart=%s/yandex-ttsd\n' "$HOME_DIR/.local/bin"
+		printf '[Install]\nWantedBy=default.target\n'
+	} >"$HOME_DIR/.config/systemd/user/yandex-ttsd.service"
 }
 
 # Remove only the exact sandbox paths created by this run; used both at the
@@ -208,37 +317,17 @@ else
 	echo "shellcheck not available; skipped"
 fi
 
-T "missing config: created from example 0600, helpful message, no build/services"
-make_sandbox
-write_stubs
-run_install
-assert_eq "exit code" "$RC" 1
-assert_eq "env mode" "$(stat -c %a "$HOME_DIR/.config/yandex-stationd/.env")" 600
-assert_eq "env copied from example" "$(cmp -s "$HOME_DIR/.config/yandex-stationd/.env" "$REPO_ROOT/.env.example" && echo same)" same
-assert_contains "names required vars" "$(cat "$OUT")" "YANDEX_MUSIC_CLIENT_SECRET"
-assert_not_contains "no build ran" "$(cat "$EVENTS")" "cargo build"
-assert_not_contains "no service touched" "$(cat "$EVENTS")" "enable"
+# --- release install: happy paths ------------------------------------------
 
-T "existing config preserved byte-for-byte, only chmod 600"
-make_sandbox
-write_stubs
-mkdir -p "$HOME_DIR/.config/yandex-stationd"
-printf 'YANDEX_X_TOKEN=keep-me\nYANDEX_MUSIC_CLIENT_ID=keep-id\nYANDEX_MUSIC_CLIENT_SECRET=keep-secret\nEXTRA=kept\n' \
-	>"$HOME_DIR/.config/yandex-stationd/.env"
-chmod 700 "$HOME_DIR/.config/yandex-stationd/.env"
-cp "$HOME_DIR/.config/yandex-stationd/.env" "$SBX/env.orig"
-run_install
-assert_eq "exit code" "$RC" 0
-cmp -s "$HOME_DIR/.config/yandex-stationd/.env" "$SBX/env.orig"
-assert_eq "config unchanged" "$?" 0
-assert_eq "config mode" "$(stat -c %a "$HOME_DIR/.config/yandex-stationd/.env")" 600
-
-T "full install: binaries+unit installed, daemon-reload, enable --now"
+T "release install: tarball+checksum downloaded, checksum verified, binaries+unit installed, enable --now"
 make_sandbox
 write_stubs
 env_with_secrets
 run_install
 assert_eq "exit code" "$RC" 0
+assert_contains "release JSON fetched" "$(cat "$EVENTS")" "releases/latest"
+assert_contains "x86_64 tarball downloaded" "$(cat "$EVENTS")" "yandex-tts-1.2.3-x86_64-unknown-linux-gnu.tar.gz"
+assert_contains "checksum verified" "$(cat "$OUT")" "verifying SHA256 checksum"
 for b in yandex-ttsd yandex-tts tts; do
 	[ -x "$HOME_DIR/.local/bin/$b" ] && PASS=$((PASS + 1)) || {
 		FAIL=$((FAIL + 1))
@@ -256,28 +345,170 @@ grep -q "ping" "$BINLOG" && PASS=$((PASS + 1)) || {
 	echo "FAIL: ping not executed"
 }
 
-T "restart path when service already active"
+T "release arch selection: aarch64 tarball chosen for aarch64 uname"
+make_sandbox
+write_stubs
+env_with_secrets
+FAKE_ARCH=aarch64 run_install
+assert_eq "exit code" "$RC" 0
+assert_contains "aarch64 tarball downloaded" "$(cat "$EVENTS")" "yandex-tts-1.2.3-aarch64-unknown-linux-gnu.tar.gz"
+assert_not_contains "x86_64 tarball not downloaded" "$(cat "$EVENTS")" "x86_64-unknown-linux-gnu"
+assert_contains "installed binary is the aarch64 build" \
+	"$(cat "$HOME_DIR/.local/bin/yandex-tts")" "target=aarch64-unknown-linux-gnu"
+
+T "unsupported architecture rejected"
+make_sandbox
+write_stubs
+env_with_secrets
+FAKE_ARCH=armv7l run_install
+assert_eq "exit code" "$RC" 1
+assert_contains "arch named in error" "$(cat "$OUT")" "armv7l"
+assert_not_contains "nothing downloaded" "$(cat "$EVENTS")" "releases/download"
+assert_not_contains "no service touched" "$(cat "$EVENTS")" "systemctl"
+
+T "missing config: created from example 0600, helpful message, nothing installed, no services"
+make_sandbox
+write_stubs
+run_install
+assert_eq "exit code" "$RC" 1
+assert_eq "env mode" "$(stat -c %a "$HOME_DIR/.config/yandex-stationd/.env")" 600
+assert_eq "env copied from example" "$(cmp -s "$HOME_DIR/.config/yandex-stationd/.env" "$REPO_ROOT/.env.example" && echo same)" same
+assert_contains "names required vars" "$(cat "$OUT")" "YANDEX_MUSIC_CLIENT_SECRET"
+assert_not_contains "no binaries installed" "$(cat "$EVENTS")" "install -m 755"
+assert_not_contains "no service touched" "$(cat "$EVENTS")" "enable"
+
+T "existing config preserved byte-for-byte, only chmod 600"
+make_sandbox
+write_stubs
+mkdir -p "$HOME_DIR/.config/yandex-stationd"
+printf 'YANDEX_X_TOKEN=keep-me\nYANDEX_MUSIC_CLIENT_ID=keep-id\nYANDEX_MUSIC_CLIENT_SECRET=keep-secret\nEXTRA=kept\n' \
+	>"$HOME_DIR/.config/yandex-stationd/.env"
+chmod 700 "$HOME_DIR/.config/yandex-stationd/.env"
+cp "$HOME_DIR/.config/yandex-stationd/.env" "$SBX/env.orig"
+run_install
+assert_eq "exit code" "$RC" 0
+cmp -s "$HOME_DIR/.config/yandex-stationd/.env" "$SBX/env.orig"
+assert_eq "config unchanged" "$?" 0
+assert_eq "config mode" "$(stat -c %a "$HOME_DIR/.config/yandex-stationd/.env")" 600
+
+T "tampered checksum: failure BEFORE any change, previous install intact, no systemctl"
 make_sandbox
 write_stubs
 env_with_secrets
 mark_new_rust_active
+TAMPER_CHECKSUM=1 run_install
+assert_eq "exit code" "$RC" 1
+assert_contains "mismatch reported" "$(cat "$OUT")" "SHA256 checksum mismatch"
+assert_not_contains "no service touched" "$(cat "$EVENTS")" "systemctl"
+assert_not_contains "no binaries installed" "$(cat "$EVENTS")" "install -m 755"
+grep -q '0\.9\.0' "$HOME_DIR/.local/bin/yandex-tts" && PASS=$((PASS + 1)) || {
+	FAIL=$((FAIL + 1))
+	echo "FAIL: old binary modified by tampered download"
+}
+assert_eq "old service still active" \
+	"$(cat "$SBX/systemctl-state/yandex-ttsd.service.active")" "yes"
+
+T "custom install dir with spaces: binaries there, unit ExecStart quoted"
+make_sandbox
+write_stubs
+env_with_secrets
+run_install --install-dir "$SBX/my tts bin"
+assert_eq "exit code" "$RC" 0
+assert_contains "binary in custom dir" "$(cat "$HOME_DIR/.local" 2>/dev/null)" ""
+[ -x "$SBX/my tts bin/yandex-ttsd" ] && PASS=$((PASS + 1)) || {
+	FAIL=$((FAIL + 1))
+	echo "FAIL: yandex-ttsd not in custom dir"
+}
+[ -x "$SBX/my tts bin/tts" ] && PASS=$((PASS + 1)) || {
+	FAIL=$((FAIL + 1))
+	echo "FAIL: tts not in custom dir"
+}
+assert_contains "ExecStart points at spaced path (quoted)" \
+	"$(cat "$HOME_DIR/.config/systemd/user/yandex-ttsd.service")" \
+	"ExecStart=\"$SBX/my tts bin/yandex-ttsd\""
+
+# --- version comparison -----------------------------------------------------
+
+T "version skip: up-to-date consistent install -> no download, no service restart"
+make_sandbox
+write_stubs
+env_with_secrets
+FAKE_OLD_VERSION=2.0.0 mark_new_rust_active
+run_install
+assert_eq "exit code" "$RC" 0
+assert_contains "release JSON fetched" "$(cat "$EVENTS")" "releases/latest"
+assert_not_contains "no tarball downloaded" "$(cat "$EVENTS")" "releases/download"
+assert_not_contains "service not restarted" "$(cat "$EVENTS")" "restart"
+assert_not_contains "service not enabled" "$(cat "$EVENTS")" "enable --now"
+assert_contains "skip message" "$(cat "$OUT")" "nothing to update"
+grep -q '2\.0\.0' "$HOME_DIR/.local/bin/yandex-tts" && PASS=$((PASS + 1)) || {
+	FAIL=$((FAIL + 1))
+	echo "FAIL: old binary replaced despite skip"
+}
+
+T "older installed version is updated"
+make_sandbox
+write_stubs
+env_with_secrets
+FAKE_OLD_VERSION=0.9.0 mark_new_rust_active
+run_install
+assert_eq "exit code" "$RC" 0
+assert_contains "tarball downloaded" "$(cat "$EVENTS")" "releases/download"
+assert_contains "service restarted" "$(cat "$EVENTS")" "restart yandex-ttsd.service"
+grep -q '1\.2\.3' "$HOME_DIR/.local/bin/yandex-tts" && PASS=$((PASS + 1)) || {
+	FAIL=$((FAIL + 1))
+	echo "FAIL: new version not installed"
+}
+
+T "unknown/unparseable installed version is always updated"
+make_sandbox
+write_stubs
+env_with_secrets
+FAKE_OLD_VERSION=dev-build-unknown mark_new_rust_active
+run_install
+assert_eq "exit code" "$RC" 0
+assert_contains "tarball downloaded" "$(cat "$EVENTS")" "releases/download"
+assert_contains "service restarted" "$(cat "$EVENTS")" "restart yandex-ttsd.service"
+
+T "inconsistent up-to-date install is repaired by full reinstall"
+make_sandbox
+write_stubs
+env_with_secrets
+FAKE_OLD_VERSION=2.0.0 mark_new_rust_active
+rm -f "$HOME_DIR/.local/bin/tts" # alias missing -> inconsistent
+run_install
+assert_eq "exit code" "$RC" 0
+assert_contains "reinstall happened (download)" "$(cat "$EVENTS")" "releases/download"
+assert_contains "service restarted" "$(cat "$EVENTS")" "restart yandex-ttsd.service"
+[ -x "$HOME_DIR/.local/bin/tts" ] && PASS=$((PASS + 1)) || {
+	FAIL=$((FAIL + 1))
+	echo "FAIL: tts alias not repaired"
+}
+
+# --- service orchestration ---------------------------------------------------
+
+T "restart path when service already active"
+make_sandbox
+write_stubs
+env_with_secrets
+FAKE_OLD_VERSION=0.9.0 mark_new_rust_active
 run_install
 assert_contains "restart instead of enable --now" "$(cat "$EVENTS")" "restart yandex-ttsd.service"
 assert_not_contains "no enable --now on upgrade" "$(cat "$EVENTS")" "enable --now yandex-ttsd.service"
 
-T "old python service stopped only at cutover: build precedes stop in ONE chronological log"
+T "old python service stopped only at cutover: download precedes stop in ONE chronological log"
 make_sandbox
 write_stubs
 env_with_secrets
 mark_old_python_active
 run_install
 assert_eq "exit code" "$RC" 0
-stop_line="$(grep -n 'disable --now yandex-stationd' "$EVENTS" | cut -d: -f1)"
-build_line="$(grep -n 'cargo build' "$EVENTS" | cut -d: -f1)"
-[ -n "$stop_line" ] && [ -n "$build_line" ] && [ "$build_line" -lt "$stop_line" ] &&
+stop_line="$(grep -n 'disable --now yandex-stationd' "$EVENTS" | cut -d: -f1 | head -n 1)"
+download_line="$(grep -n 'curl.*releases/download' "$EVENTS" | cut -d: -f1 | head -n 1)"
+[ -n "$stop_line" ] && [ -n "$download_line" ] && [ "$download_line" -lt "$stop_line" ] &&
 	PASS=$((PASS + 1)) || {
 	FAIL=$((FAIL + 1))
-	echo "FAIL: old service not stopped after build (stop=$stop_line build=$build_line)"
+	echo "FAIL: old service not stopped after download (stop=$stop_line download=$download_line)"
 }
 
 T "old python stop failure aborts cutover: no enable/restart of new unit, old not disabled"
@@ -297,13 +528,11 @@ T "upgrade failure: previous binaries+unit restored, rust service restarted, no 
 make_sandbox
 write_stubs
 env_with_secrets
-mark_new_rust_active
+FAKE_OLD_VERSION=0.9.0 mark_new_rust_active
 FAIL_NEW_START=1 run_install
 assert_eq "exit code" "$RC" 1
-assert_eq "old yandex-ttsd binary restored" "$(cat "$HOME_DIR/.local/bin/yandex-ttsd")" "old-ttsd-binary"
-assert_eq "old tts binary restored" "$(cat "$HOME_DIR/.local/bin/yandex-tts")" "old-tts-binary"
-assert_eq "old tts alias restored" "$(cat "$HOME_DIR/.local/bin/tts")" "old-tts-alias"
-assert_eq "old unit restored" "$(cat "$HOME_DIR/.config/systemd/user/yandex-ttsd.service")" "old-unit-content"
+assert_contains "old yandex-ttsd binary restored" "$(cat "$HOME_DIR/.local/bin/yandex-ttsd")" "0.9.0"
+assert_contains "old tts binary restored" "$(cat "$HOME_DIR/.local/bin/tts")" "0.9.0"
 new_active="$(cat "$SBX/systemctl-state/yandex-ttsd.service.active" 2>/dev/null || echo no)"
 assert_eq "rust service active again after rollback" "$new_active" "yes"
 assert_not_contains "rust service never disabled" "$(cat "$EVENTS")" "disable yandex-ttsd.service"
@@ -327,19 +556,85 @@ for b in yandex-ttsd yandex-tts tts; do
 	}
 done
 
+T "service-start failure: journal command suggested, no excerpt printed"
+make_sandbox
+write_stubs
+env_with_secrets
+mark_old_python_active
+FAIL_INACTIVE_START=1 run_install
+assert_eq "exit code" "$RC" 1
+assert_contains "manual journal command" "$(cat "$OUT")" "journalctl --user -u yandex-ttsd.service"
+assert_contains "old python restored" "$(cat "$EVENTS")" "start yandex-stationd.service"
+
+# --- skills ------------------------------------------------------------------
+
+T "--skills-root invokes installed tts skill_install with the exact path"
+make_sandbox
+write_stubs
+env_with_secrets
+run_install --skills-root "$SBX/skills"
+assert_contains "skill_install invoked" "$(cat "$BINLOG")" "skill_install"
+grep -q "skill_install.*$SBX/skills" "$BINLOG" && PASS=$((PASS + 1)) || {
+	FAIL=$((FAIL + 1))
+	echo "FAIL: skills root path not passed: $(grep skill_install "$BINLOG")"
+}
+
+T "without --skills-root OpenClaw untouched"
+make_sandbox
+write_stubs
+env_with_secrets
+run_install
+assert_not_contains "no skill_install" "$(cat "$BINLOG")" "skill_install"
+
 T "skill_install failure before cutover: old python never stopped, nothing switched"
 make_sandbox
 write_stubs
 env_with_secrets
 mark_old_python_active
-export FAIL_SKILL=1
-run_install --skills-root "$SBX/skills"
-unset FAIL_SKILL
+FAIL_SKILL=1 run_install --skills-root "$SBX/skills"
 assert_eq "exit code" "$RC" 1
 assert_not_contains "old python not stopped" "$(cat "$EVENTS")" "now yandex-stationd"
 assert_not_contains "new unit not enabled" "$(cat "$EVENTS")" "enable --now yandex-ttsd.service"
 assert_not_contains "new unit not restarted" "$(cat "$EVENTS")" "restart yandex-ttsd.service"
 assert_contains "skill_install attempted" "$(cat "$BINLOG")" "skill_install"
+
+T "skill-only mode: fully offline (no curl/cargo/systemctl), binary from default location"
+make_sandbox
+write_stubs
+mkdir -p "$HOME_DIR/.local/bin"
+make_fake_binary "$HOME_DIR/.local/bin/tts" "1.2.3"
+run_install skill --skills-root "$SBX/skills"
+assert_eq "exit code" "$RC" 0
+assert_eq "events log empty (no network, no build, no service)" "$(wc -l <"$EVENTS")" 0
+assert_contains "skill_install called" "$(cat "$BINLOG")" "skill_install $SBX/skills"
+
+T "skill-only mode with --install-dir: uses ONLY that directory"
+make_sandbox
+write_stubs
+mkdir -p "$SBX/custom-bin"
+make_fake_binary "$SBX/custom-bin/yandex-tts" "1.2.3"
+run_install skill --skills-root "$SBX/skills" --install-dir "$SBX/custom-bin"
+assert_eq "exit code" "$RC" 0
+assert_contains "skill_install called" "$(cat "$BINLOG")" "skill_install $SBX/skills"
+
+T "skill-only mode without any installed binary: clear error"
+make_sandbox
+write_stubs
+run_install skill --skills-root "$SBX/skills"
+assert_eq "exit code" "$RC" 1
+assert_contains "actionable message" "$(cat "$OUT")" "no installed tts or yandex-tts binary found"
+assert_eq "events log empty" "$(wc -l <"$EVENTS")" 0
+
+T "skill-only mode rejects --force"
+make_sandbox
+write_stubs
+mkdir -p "$HOME_DIR/.local/bin"
+make_fake_binary "$HOME_DIR/.local/bin/tts" "1.2.3"
+run_install skill --skills-root "$SBX/skills" --force
+assert_eq "exit code" "$RC" 2
+assert_not_contains "no skill ran" "$(cat "$BINLOG")" "skill_install"
+
+# --- secrets / config validation --------------------------------------------
 
 T "secrets never printed"
 make_sandbox
@@ -372,49 +667,7 @@ printf 'YANDEX_X_TOKEN="tok"\nYANDEX_MUSIC_CLIENT_ID='"'"'id'"'"'\nYANDEX_MUSIC_
 run_install
 assert_eq "exit code" "$RC" 0
 
-T "--skills-root invokes installed tts skill_install with the exact path"
-make_sandbox
-write_stubs
-env_with_secrets
-run_install --skills-root "$SBX/skills"
-assert_contains "skill_install invoked" "$(cat "$BINLOG")" "skill_install"
-grep -q "skill_install.*$SBX/skills" "$BINLOG" && PASS=$((PASS + 1)) || {
-	FAIL=$((FAIL + 1))
-	echo "FAIL: skills root path not passed: $(grep skill_install "$BINLOG")"
-}
-
-T "without --skills-root OpenClaw untouched"
-make_sandbox
-write_stubs
-env_with_secrets
-run_install
-assert_not_contains "no skill_install" "$(cat "$BINLOG")" "skill_install"
-
-T "unknown argument rejected"
-make_sandbox
-write_stubs
-run_install --bogus
-assert_eq "exit code" "$RC" 2
-
-T "--help prints usage and exits 0 without HOME or cargo"
-OUT="$(mktemp /tmp/opencode/install-help.XXXXXX)"
-SANDBOXES+=("$(dirname "$OUT")/$(basename "$OUT")")
-( cd / && env -i /usr/bin/env bash "$REPO_ROOT/install.sh" --help ) >"$OUT" 2>&1
-RC=$?
-assert_eq "exit code" "$RC" 0
-assert_contains "usage printed" "$(cat "$OUT")" "--skills-root PATH"
-assert_not_contains "no prerequisites required" "$(cat "$OUT")" "not found"
-
-T "--skills-root '' fails before build instead of silently skipping"
-make_sandbox
-write_stubs
-env_with_secrets
-run_install --skills-root ''
-assert_eq "exit code" "$RC" 2
-assert_contains "actionable message" "$(cat "$OUT")" "--skills-root requires a non-empty PATH"
-assert_not_contains "no build ran" "$(cat "$EVENTS")" "cargo build"
-
-T "export prefix rejected with variable named, no build"
+T "export prefix rejected with variable named, nothing installed"
 make_sandbox
 write_stubs
 env_with_secrets
@@ -425,7 +678,7 @@ assert_eq "exit code" "$RC" 1
 assert_contains "variable named" "$(cat "$OUT")" "YANDEX_X_TOKEN"
 assert_contains "systemd reason given" "$(cat "$OUT")" "systemd EnvironmentFile"
 assert_not_contains "no value leak" "$(cat "$OUT")" "=t"
-assert_not_contains "no build ran" "$(cat "$EVENTS")" "cargo build"
+assert_not_contains "no binaries installed" "$(cat "$EVENTS")" "install -m 755"
 
 T "quoted empty value counts as missing"
 make_sandbox
@@ -438,15 +691,90 @@ assert_eq "exit code" "$RC" 1
 assert_contains "double-quoted empty named" "$(cat "$OUT")" "YANDEX_X_TOKEN"
 assert_contains "single-quoted empty named" "$(cat "$OUT")" "YANDEX_MUSIC_CLIENT_ID"
 
-T "service-start failure: journal command suggested, no excerpt printed"
+# --- argument handling -------------------------------------------------------
+
+T "unknown argument rejected"
+make_sandbox
+write_stubs
+run_install --bogus
+assert_eq "exit code" "$RC" 2
+
+T "--help prints usage and exits 0 without HOME or cargo"
+OUT="$(mktemp /tmp/opencode/install-help.XXXXXX)"
+SANDBOXES+=("$(dirname "$OUT")/$(basename "$OUT")")
+(cd / && env -i /usr/bin/env bash "$REPO_ROOT/install.sh" --help) >"$OUT" 2>&1
+RC=$?
+assert_eq "exit code" "$RC" 0
+assert_contains "usage printed" "$(cat "$OUT")" "--skills-root PATH"
+assert_not_contains "no prerequisites required" "$(cat "$OUT")" "not found"
+
+T "--skills-root '' fails before anything instead of silently skipping"
 make_sandbox
 write_stubs
 env_with_secrets
-mark_old_python_active
-FAIL_INACTIVE_START=1 run_install
+run_install --skills-root ''
+assert_eq "exit code" "$RC" 2
+assert_contains "actionable message" "$(cat "$OUT")" "--skills-root requires a non-empty PATH"
+assert_not_contains "no binaries installed" "$(cat "$EVENTS")" "install -m 755"
+
+# --- build from source --------------------------------------------------------
+
+T "--build-from-source non-interactive: rejected with --force hint, nothing done"
+make_sandbox
+write_stubs
+env_with_secrets
+run_install --build-from-source </dev/null
 assert_eq "exit code" "$RC" 1
-assert_contains "manual journal command" "$(cat "$OUT")" "journalctl --user -u yandex-ttsd.service"
-assert_contains "old python restored" "$(cat "$EVENTS")" "start yandex-stationd.service"
+assert_contains "force hint" "$(cat "$OUT")" "--force"
+assert_not_contains "no cargo run" "$(cat "$EVENTS")" "cargo"
+assert_not_contains "no service touched" "$(cat "$EVENTS")" "enable"
+
+T "--build-from-source --force: builds, installs from target, no network"
+make_sandbox
+write_stubs
+env_with_secrets
+run_install --build-from-source --force
+assert_eq "exit code" "$RC" 0
+assert_contains "cargo build ran" "$(cat "$EVENTS")" "cargo build"
+assert_not_contains "no network" "$(cat "$EVENTS")" "curl"
+for b in yandex-ttsd yandex-tts tts; do
+	[ -x "$HOME_DIR/.local/bin/$b" ] && PASS=$((PASS + 1)) || {
+		FAIL=$((FAIL + 1))
+		echo "FAIL: source-built binary not installed: $b"
+	}
+done
+assert_contains "enable --now called" "$(cat "$EVENTS")" "enable --now yandex-ttsd.service"
+
+T "--force alone does not bypass the build-from-source confirmation"
+make_sandbox
+write_stubs
+env_with_secrets
+run_install --build-from-source --force </dev/null
+assert_eq "exit code" "$RC" 0
+assert_contains "cargo build ran" "$(cat "$EVENTS")" "cargo build"
+
+# --- curl | bash --------------------------------------------------------------
+
+T "curl | bash: installs from release without a repository checkout"
+make_sandbox
+write_stubs
+env_with_secrets
+OUT="$SBX/out.txt"
+(
+	export HOME="$HOME_DIR"
+	export PATH="$STUB_BIN:$PATH"
+	cd /
+	curl -fsSL https://example.invalid/install.sh | bash -s -- >"$OUT" 2>&1
+)
+RC=$?
+assert_eq "exit code" "$RC" 0
+assert_contains "tarball downloaded" "$(cat "$EVENTS")" "releases/download"
+[ -x "$HOME_DIR/.local/bin/yandex-ttsd" ] && PASS=$((PASS + 1)) || {
+	FAIL=$((FAIL + 1))
+	echo "FAIL: binary not installed via curl|bash"
+}
+
+# --- hygiene ------------------------------------------------------------------
 
 T "no backup dirs left behind"
 leftover="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'yandex-tts-install-backup.*' 2>/dev/null | wc -l)"
