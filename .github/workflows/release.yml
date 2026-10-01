@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # aarch64 (arm64), glibc
+          - target: aarch64-unknown-linux-gnu
+          # aarch64 (arm64), musl (статическая сборка, e.g. Alpine)
+          - target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Build
+        run: cross build --release --target ${{ matrix.target }} -p yandex-tts -p yandex-ttsd
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="yandex-tts-${VERSION}-${{ matrix.target }}"
+          DIR="${NAME}"
+          mkdir -p "$DIR"
+          cp target/${{ matrix.target }}/release/yandex-tts "$DIR/"
+          cp target/${{ matrix.target }}/release/yandex-ttsd "$DIR/"
+          cp README.md LICENSE "$DIR/" 2>/dev/null || true
+          tar -czf "${NAME}.tar.gz" "$DIR"
+          sha256sum "${NAME}.tar.gz" > "checksums-${{ matrix.target }}.txt"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            *.tar.gz
+            checksums-*.txt
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
