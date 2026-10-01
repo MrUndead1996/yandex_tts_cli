@@ -290,8 +290,11 @@ normalize_install_dir() {
 	*) INSTALL_DIR="$(pwd -P)/$INSTALL_DIR" ;;
 	esac
 }
-normalize_install_dir
 
+# Default binary directory; must be set BEFORE normalization so that an
+# empty INSTALL_DIR does not get expanded to "$PWD".
+[ -n "$INSTALL_DIR" ] || INSTALL_DIR="$HOME/.local/bin"
+normalize_install_dir
 log() { printf 'install.sh: %s\n' "$*"; }
 die() {
 	printf 'install.sh: error: %s\n' "$*" >&2
@@ -339,8 +342,6 @@ run_skill_mode() {
 if [ "$MODE" = skill ]; then
 	run_skill_mode
 fi
-
-[ -n "$INSTALL_DIR" ] || INSTALL_DIR="$HOME/.local/bin"
 
 # ---------------------------------------------------------------------------
 # Temporary download/staging directory (cleaned on exit, even on failure
