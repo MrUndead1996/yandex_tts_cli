@@ -566,74 +566,6 @@ assert_eq "exit code" "$RC" 1
 assert_contains "manual journal command" "$(cat "$OUT")" "journalctl --user -u yandex-ttsd.service"
 assert_contains "old python restored" "$(cat "$EVENTS")" "start yandex-stationd.service"
 
-# --- skills ------------------------------------------------------------------
-
-T "--skills-root invokes installed tts skill_install with the exact path"
-make_sandbox
-write_stubs
-env_with_secrets
-run_install --skills-root "$SBX/skills"
-assert_contains "skill_install invoked" "$(cat "$BINLOG")" "skill_install"
-grep -q "skill_install.*$SBX/skills" "$BINLOG" && PASS=$((PASS + 1)) || {
-	FAIL=$((FAIL + 1))
-	echo "FAIL: skills root path not passed: $(grep skill_install "$BINLOG")"
-}
-
-T "without --skills-root OpenClaw untouched"
-make_sandbox
-write_stubs
-env_with_secrets
-run_install
-assert_not_contains "no skill_install" "$(cat "$BINLOG")" "skill_install"
-
-T "skill_install failure before cutover: old python never stopped, nothing switched"
-make_sandbox
-write_stubs
-env_with_secrets
-mark_old_python_active
-FAIL_SKILL=1 run_install --skills-root "$SBX/skills"
-assert_eq "exit code" "$RC" 1
-assert_not_contains "old python not stopped" "$(cat "$EVENTS")" "now yandex-stationd"
-assert_not_contains "new unit not enabled" "$(cat "$EVENTS")" "enable --now yandex-ttsd.service"
-assert_not_contains "new unit not restarted" "$(cat "$EVENTS")" "restart yandex-ttsd.service"
-assert_contains "skill_install attempted" "$(cat "$BINLOG")" "skill_install"
-
-T "skill-only mode: fully offline (no curl/cargo/systemctl), binary from default location"
-make_sandbox
-write_stubs
-mkdir -p "$HOME_DIR/.local/bin"
-make_fake_binary "$HOME_DIR/.local/bin/tts" "1.2.3"
-run_install skill --skills-root "$SBX/skills"
-assert_eq "exit code" "$RC" 0
-assert_eq "events log empty (no network, no build, no service)" "$(wc -l <"$EVENTS")" 0
-assert_contains "skill_install called" "$(cat "$BINLOG")" "skill_install $SBX/skills"
-
-T "skill-only mode with --install-dir: uses ONLY that directory"
-make_sandbox
-write_stubs
-mkdir -p "$SBX/custom-bin"
-make_fake_binary "$SBX/custom-bin/yandex-tts" "1.2.3"
-run_install skill --skills-root "$SBX/skills" --install-dir "$SBX/custom-bin"
-assert_eq "exit code" "$RC" 0
-assert_contains "skill_install called" "$(cat "$BINLOG")" "skill_install $SBX/skills"
-
-T "skill-only mode without any installed binary: clear error"
-make_sandbox
-write_stubs
-run_install skill --skills-root "$SBX/skills"
-assert_eq "exit code" "$RC" 1
-assert_contains "actionable message" "$(cat "$OUT")" "no installed tts or yandex-tts binary found"
-assert_eq "events log empty" "$(wc -l <"$EVENTS")" 0
-
-T "skill-only mode rejects --force"
-make_sandbox
-write_stubs
-mkdir -p "$HOME_DIR/.local/bin"
-make_fake_binary "$HOME_DIR/.local/bin/tts" "1.2.3"
-run_install skill --skills-root "$SBX/skills" --force
-assert_eq "exit code" "$RC" 2
-assert_not_contains "no skill ran" "$(cat "$BINLOG")" "skill_install"
-
 # --- secrets / config validation --------------------------------------------
 
 T "secrets never printed"
@@ -705,17 +637,8 @@ SANDBOXES+=("$(dirname "$OUT")/$(basename "$OUT")")
 (cd / && env -i /usr/bin/env bash "$REPO_ROOT/install.sh" --help) >"$OUT" 2>&1
 RC=$?
 assert_eq "exit code" "$RC" 0
-assert_contains "usage printed" "$(cat "$OUT")" "--skills-root PATH"
+assert_contains "usage printed" "$(cat "$OUT")" "--install-dir PATH"
 assert_not_contains "no prerequisites required" "$(cat "$OUT")" "not found"
-
-T "--skills-root '' fails before anything instead of silently skipping"
-make_sandbox
-write_stubs
-env_with_secrets
-run_install --skills-root ''
-assert_eq "exit code" "$RC" 2
-assert_contains "actionable message" "$(cat "$OUT")" "--skills-root requires a non-empty PATH"
-assert_not_contains "no binaries installed" "$(cat "$EVENTS")" "install -m 755"
 
 # --- build from source --------------------------------------------------------
 

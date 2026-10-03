@@ -23,9 +23,8 @@
 #   requires an interactive confirmation (unless --force is given) before
 #   anything is cloned or built. There is no automatic fallback to building
 #   from source when the release download fails.
-# - `install.sh skill --skills-root PATH` is a standalone offline mode: it
-#   runs `tts skill_install PATH` with an already installed tts/yandex-tts
-#   binary and exits; no network, prerequisites, config or service changes.
+# - OpenClaw skill installation is provided by the CLI (`tts skill_install`),
+#   independently of this installer.
 # - Transactional: existing binaries and unit are backed up (private temp
 #   dir); the transaction flag is set only after the complete snapshot, so a
 #   failure during snapshotting restores nothing and deletes nothing. On any
@@ -44,7 +43,6 @@
 #
 # Usage:
 #   install.sh [OPTIONS]                    install/upgrade from a release
-#   install.sh skill --skills-root PATH     offline OpenClaw skill install
 #   install.sh --help                       this help
 #
 #   curl -fsSL https://raw.githubusercontent.com/MrUndead1996/yandex_tts_cli/main/install.sh | bash -s -- [OPTIONS]
@@ -54,9 +52,6 @@
 #   --install-dir PATH      Install binaries into PATH (default:
 #                           $HOME/.local/bin). The systemd unit ExecStart is
 #                           rewritten to the chosen path.
-#   --skills-root PATH      Additionally install the OpenClaw skill into
-#                           PATH via the freshly installed `tts` (offline).
-#                           Without the flag OpenClaw is not touched.
 #   --build-from-source     Build the workspace from source with cargo
 #                           instead of installing a release binary. Requires
 #                           an interactive confirmation before clone/build;
@@ -70,18 +65,10 @@
 #   -h, --help              Show this help and exit.
 #
 # Skill mode:
-#   install.sh skill --skills-root PATH
-#   Only --skills-root (required) and --help are accepted; --force,
-#   --build-from-source and --install-dir are rejected. Uses an existing
-#   tts or yandex-tts binary (PATH, then $HOME/.local/bin) and fails with a
-#   clear error if none is installed. Never touches the network, the config,
-#   or any service.
-#
 # Examples:
 #   install.sh                                  # latest release to ~/.local/bin
 #   install.sh --install-dir /opt/tts/bin       # custom binary dir
-#   install.sh --skills-root ~/.openclaw/skills # release + OpenClaw skill
-#   install.sh skill --skills-root ~/.openclaw/skills  # skill only, offline
+#   tts skill_install ~/.openclaw/skills        # install OpenClaw skill offline
 #   install.sh --build-from-source              # build from source (ask first)
 
 set -euo pipefail
@@ -89,23 +76,18 @@ set -euo pipefail
 REPO_URL="https://github.com/MrUndead1996/yandex_tts_cli"
 RAW_URL="https://raw.githubusercontent.com/MrUndead1996/yandex_tts_cli"
 
-MODE="install"
 INSTALL_DIR=""
 INSTALL_DIR_GIVEN=0
-SKILLS_ROOT=""
-SKILLS_ROOT_GIVEN=0
 BUILD_FROM_SOURCE=0
 FORCE=0
 
 usage() {
 	cat <<EOF
 usage: $0 [OPTIONS]                    install/upgrade from the latest release
-       $0 skill --skills-root PATH     offline OpenClaw skill install (no daemon)
        $0 --help                       detailed help
 
 Options (install mode):
   --install-dir PATH   binary directory (default: \$HOME/.local/bin)
-  --skills-root PATH   also install the OpenClaw skill into PATH (offline)
   --build-from-source  build with cargo instead of downloading a release
                        (interactive confirmation unless --force)
   --force              confirmation bypass for --build-from-source (automation)
@@ -118,7 +100,6 @@ help_full() {
 install.sh — install/upgrade the yandex-tts daemon/CLI on Linux (x86_64/aarch64).
 
 usage: $0 [OPTIONS]
-       $0 skill --skills-root PATH
        $0 --help
 
 Default mode (release install):
@@ -132,9 +113,6 @@ Options (install mode):
   --install-dir PATH   Install binaries into PATH (default: \$HOME/.local/bin).
                        The systemd unit ExecStart is rewritten accordingly;
                        spaces and special characters in PATH are escaped.
-  --skills-root PATH   Additionally install the OpenClaw skill into PATH via
-                       the freshly installed tts binary (fully offline).
-                       Without this flag OpenClaw is not touched.
   --build-from-source  Build the workspace from source instead (requires the
                        repository or a fresh clone; runs
                        'cargo build --release --locked --workspace').
@@ -145,20 +123,12 @@ Options (install mode):
                        It does NOT force a reinstall when already up to date.
   -h, --help           Show this help.
 
-Skill mode (standalone, offline):
-  $0 skill --skills-root PATH [--install-dir PATH]
-  Installs the OpenClaw skill files into PATH using an ALREADY INSTALLED
-  tts or yandex-tts binary. By default \$HOME/.local/bin is preferred,
-  then PATH. With an explicit --install-dir ONLY binaries from exactly
-  that directory are used (an error if none is found there).
-  No network access, no configuration, no build, no service changes.
-  --force and --build-from-source are rejected in skill mode.
+OpenClaw skill installation is provided by the CLI: tts skill_install PATH
 
 Examples:
   $0                                            # latest release, ~/.local/bin
   $0 --install-dir /opt/tts/bin                 # custom binary directory
-  $0 --skills-root ~/.openclaw/skills           # release + skill install
-  $0 skill --skills-root ~/.openclaw/skills     # skill only (offline)
+  tts skill_install ~/.openclaw/skills          # install skill (offline)
   $0 --build-from-source                        # build from source (asks first)
   $0 --build-from-source --force                # same, no confirmation (CI)
 
@@ -170,59 +140,7 @@ EOF
 # ---------------------------------------------------------------------------
 # Argument parsing.
 # ---------------------------------------------------------------------------
-if [ $# -gt 0 ] && [ "$1" = "skill" ]; then
-	MODE="skill"
-	shift
-fi
-
-case "$MODE" in
-skill)
-	# Skill mode: --skills-root PATH (required), optional --install-dir
-	# PATH (restrict the binary lookup to exactly that directory), --help.
-	SKILL_ROOT=""
-	while [ $# -gt 0 ]; do
-		case "$1" in
-		--skills-root)
-			[ $# -ge 2 ] || {
-				usage
-				exit 2
-			}
-			SKILL_ROOT="$2"
-			shift 2
-			;;
-		--install-dir)
-			[ $# -ge 2 ] || {
-				usage
-				exit 2
-			}
-			INSTALL_DIR="$2"
-			INSTALL_DIR_GIVEN=1
-			shift 2
-			;;
-		-h | --help)
-			help_full
-			exit 0
-			;;
-		--force | --build-from-source)
-			echo "install.sh skill: '$1' is not valid in skill mode" >&2
-			usage
-			exit 2
-			;;
-		*)
-			echo "install.sh skill: unknown argument: $1" >&2
-			usage
-			exit 2
-			;;
-		esac
-	done
-	[ -n "$SKILL_ROOT" ] || {
-		echo "install.sh skill: --skills-root PATH is required" >&2
-		usage
-		exit 2
-	}
-	;;
-install)
-	while [ $# -gt 0 ]; do
+while [ $# -gt 0 ]; do
 		case "$1" in
 		--install-dir)
 			[ $# -ge 2 ] || {
@@ -231,15 +149,6 @@ install)
 			}
 			INSTALL_DIR="$2"
 			INSTALL_DIR_GIVEN=1
-			shift 2
-			;;
-		--skills-root)
-			[ $# -ge 2 ] || {
-				usage
-				exit 2
-			}
-			SKILLS_ROOT="$2"
-			SKILLS_ROOT_GIVEN=1
 			shift 2
 			;;
 		--build-from-source)
@@ -261,9 +170,7 @@ install)
 			exit 2
 			;;
 		esac
-	done
-	;;
-esac
+done
 
 if [ -z "${HOME:-}" ]; then
 	echo "install.sh: HOME is not set" >&2
@@ -273,10 +180,6 @@ fi
 # An explicitly requested but empty path is an error, not a silent skip.
 if [ "$INSTALL_DIR_GIVEN" -eq 1 ] && [ -z "$INSTALL_DIR" ]; then
 	echo "install.sh: --install-dir requires a non-empty PATH argument" >&2
-	exit 2
-fi
-if [ "$SKILLS_ROOT_GIVEN" -eq 1 ] && [ -z "$SKILLS_ROOT" ]; then
-	echo "install.sh: --skills-root requires a non-empty PATH argument" >&2
 	exit 2
 fi
 
@@ -306,43 +209,6 @@ need_cmd() {
 }
 
 # ---------------------------------------------------------------------------
-# Skill mode: standalone offline skill installation. Runs before any
-# prerequisite checks, network access, configuration or service handling.
-# ---------------------------------------------------------------------------
-run_skill_mode() {
-	local bin
-	if [ "$INSTALL_DIR_GIVEN" -eq 1 ]; then
-		# Explicit custom directory: use ONLY binaries from exactly that
-		# directory (never fall back to PATH or any other location).
-		for bin in "$INSTALL_DIR/tts" "$INSTALL_DIR/yandex-tts"; do
-			[ -x "$bin" ] && [ ! -L "$bin" ] && break
-			bin=""
-		done
-		[ -n "$bin" ] ||
-			die "no tts or yandex-tts binary found in $INSTALL_DIR (install there first with: install.sh --install-dir '$INSTALL_DIR')"
-	else
-		# Default: prefer the standard install location over whatever
-		# happens to be first in PATH (avoids picking a wrong executable).
-		for bin in "$HOME/.local/bin/tts" "$HOME/.local/bin/yandex-tts" \
-			"$(command -v tts 2>/dev/null || true)" \
-			"$(command -v yandex-tts 2>/dev/null || true)"; do
-			[ -n "$bin" ] && [ -x "$bin" ] && break
-			bin=""
-		done
-		[ -n "$bin" ] ||
-			die "no installed tts or yandex-tts binary found (install first with: install.sh)"
-	fi
-	log "installing OpenClaw skill into $SKILL_ROOT (offline, using $bin)"
-	"$bin" skill_install "$SKILL_ROOT" ||
-		die "tts skill_install $SKILL_ROOT failed"
-	log "OpenClaw skill installed"
-	exit 0
-}
-
-if [ "$MODE" = skill ]; then
-	run_skill_mode
-fi
-
 # ---------------------------------------------------------------------------
 # Temporary download/staging directory (cleaned on exit, even on failure
 # before the transaction starts).
@@ -491,7 +357,7 @@ execstart_string() {
 # A skipped update is only safe when the previous install is complete and
 # consistent: the tts alias exists and the installed unit's ExecStart refers
 # to the current absolute binary path. Otherwise the "up-to-date" binary
-# would leave skill mode and the service pointing at a stale/missing install,
+# would leave the CLI alias and service pointing at a stale/missing install,
 # so the caller repairs by reinstalling.
 install_is_consistent() {
 	local expected
@@ -620,12 +486,6 @@ if [ "$BUILD_FROM_SOURCE" -eq 0 ]; then
 	if [ -n "$CURRENT_VERSION" ] && version_ge "$CURRENT_VERSION" "$RELEASE_VERSION" &&
 		install_is_consistent; then
 		log "installed version $CURRENT_VERSION is >= release $RELEASE_VERSION; nothing to update"
-		if [ "$SKILLS_ROOT_GIVEN" -eq 1 ]; then
-			log "installing OpenClaw skill into $SKILLS_ROOT"
-			"$INSTALL_DIR/tts" skill_install "$SKILLS_ROOT" ||
-				die "tts skill_install $SKILLS_ROOT failed"
-			log "OpenClaw skill installed"
-		fi
 		exit 0
 	fi
 
@@ -853,19 +713,6 @@ for b in yandex-ttsd yandex-tts tts; do
 done
 install -m 644 "$WORK_DIR/unit.rendered" "$UNIT_DIR/$UNIT_NAME"
 systemctl --user daemon-reload
-
-# ---------------------------------------------------------------------------
-# Optional explicit skill installation (offline; done before any service
-# switch so a failure here cannot leave a broken cutover behind — the
-# EXIT trap restores the previous binaries/unit).
-# ---------------------------------------------------------------------------
-
-if [ -n "$SKILLS_ROOT" ]; then
-	log "installing OpenClaw skill into $SKILLS_ROOT"
-	"$INSTALL_DIR/tts" skill_install "$SKILLS_ROOT" ||
-		die "tts skill_install $SKILLS_ROOT failed"
-	log "OpenClaw skill installed"
-fi
 
 # ---------------------------------------------------------------------------
 # Cutover: stop the old Python service; abort if that fails.

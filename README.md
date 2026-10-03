@@ -22,23 +22,17 @@ curl -fsSL https://raw.githubusercontent.com/MrUndead1996/yandex_tts_cli/main/in
 ./install.sh --install-dir /opt/tts/bin
 ```
 
-Прочие опции: `--skills-root PATH` — дополнительно установить навык OpenClaw (см. ниже); `--help` — подробная справка.
+Дополнительные опции: `--build-from-source`, `--force` и `--help` — подробная справка.
 
 ## Установка навыка OpenClaw (отдельная команда, офлайн)
 
-Навык ставится отдельно уже установленным бинарником — без сети, без сборки и без изменений сервиса:
+Навык устанавливает сам CLI: файлы навыка встроены в бинарник, поэтому команда работает офлайн и не меняет сервис:
 
 ```bash
-./install.sh skill --skills-root ~/.openclaw/skills
+tts skill_install ~/.openclaw/skills
 ```
 
-По умолчанию используется `tts`/`yandex-tts` из `~/.local/bin`, затем из `PATH`. Можно явно указать директорию с бинарником:
-
-```bash
-./install.sh skill --skills-root ~/.openclaw/skills --install-dir /opt/tts/bin
-```
-
-При установке релиза навык можно поставить сразу: `./install.sh --skills-root ~/.openclaw/skills`.
+Если бинарник установлен не в `PATH`, вызовите его по полному пути, например `/var/docker/openclaw/tools/tts skill_install ~/.openclaw/skills`.
 
 ## Конфигурация (обязательна)
 
@@ -56,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/MrUndead1996/yandex_tts_cli/main/in
 yandex-tts say "Привет"    # синтезировать и проиграть речь (через демон)
 yandex-tts ping            # проверить доступность демона
 yandex-tts --version       # версия
-tts skill_install <PATH>   # установить навык OpenClaw в PATH (офлайн)
+tts skill_install <PATH>   # установить навык OpenClaw в корень навыков (офлайн)
 ```
 
 Логи демона: `journalctl --user -u yandex-ttsd.service`.
