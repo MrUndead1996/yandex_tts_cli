@@ -1570,7 +1570,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "yandex-tts"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "yandex-tts-auth"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "httpdate",
@@ -1591,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "yandex-tts-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "serde_json",
@@ -1600,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "yandex-ttsd"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "futures-util",
  "libc",
