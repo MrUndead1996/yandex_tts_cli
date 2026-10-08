@@ -220,6 +220,19 @@ async fn station_failure_maps_to_station_not_connected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn speaking_station_rejects_say_with_distinct_error() {
+    let daemon = start_daemon().await;
+    daemon.station.set_failure(Some(StationError::Speaking));
+    let mut client = daemon.client();
+    assert_eq!(
+        client.request(&Request::Say("hello".into())),
+        Ok(Response::error("station_speaking"))
+    );
+    assert!(daemon.station.spoken().is_empty());
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn read_timeout_responds_timeout_and_closes() {
     let daemon = start_daemon_with(
         Arc::new(MockStation::default()),

@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -80,6 +81,9 @@ pub enum GlagolError {
     /// A transport or TLS failure while dialing or talking to the Station.
     #[error("Glagol transport error")]
     Transport,
+    /// Alice is speaking, or another say request is still in flight.
+    #[error("Station is speaking")]
+    Speaking,
 }
 
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -109,6 +113,8 @@ struct Shared {
     writer: Mutex<Option<mpsc::Sender<Writer>>>,
     /// Requests awaiting responses, keyed by request id.
     pending: Mutex<HashMap<String, oneshot::Sender<Result<Value, GlagolError>>>>,
+    speaking: AtomicBool,
+    say_lock: tokio::sync::Mutex<()>,
     /// Error observed by the reader, set exactly once when it stops.
     close_error: watch::Sender<Option<GlagolError>>,
 }
@@ -195,6 +201,8 @@ impl GlagolClient {
                 generation: std::sync::atomic::AtomicU64::new(0),
                 writer: Mutex::new(None),
                 pending: Mutex::new(HashMap::new()),
+                speaking: AtomicBool::new(false),
+                say_lock: tokio::sync::Mutex::new(()),
                 close_error,
             }),
         })
@@ -285,6 +293,14 @@ impl GlagolClient {
     /// played; the daemon must still validate the response before reporting
     /// success to its own clients (and remains a placeholder for now).
     pub async fn say(&self, phrase: &str) -> Result<Value, GlagolError> {
+        let _guard = self
+            .shared
+            .say_lock
+            .try_lock()
+            .map_err(|_| GlagolError::Speaking)?;
+        if self.shared.speaking.load(Ordering::SeqCst) {
+            return Err(GlagolError::Speaking);
+        }
         self.send(say_payload(phrase)).await
     }
 
@@ -352,6 +368,7 @@ impl GlagolClient {
             }
         }
         *self.shared.writer.lock().expect("writer lock") = Some(tx);
+        self.shared.speaking.store(false, Ordering::SeqCst);
         self.shared.close_error.send_replace(None);
         let shared = Arc::clone(&self.shared);
         tokio::spawn(async move {
@@ -410,7 +427,11 @@ async fn reader<S>(
     loop {
         tokio::select! {
             message = ws.next() => match message {
-                Some(Ok(Message::Text(text))) => dispatch(&shared, text.as_str()),
+                Some(Ok(Message::Text(text))) => {
+                    if shared.generation.load(Ordering::Relaxed) == generation {
+                        dispatch(&shared, text.as_str());
+                    }
+                }
                 Some(Ok(Message::Pong(_))) => pong_deadline = None,
                 Some(Ok(Message::Ping(payload))) => {
                     if ws.send(Message::Pong(payload)).await.is_err() {
@@ -458,6 +479,7 @@ async fn reader<S>(
     // Fail everyone still waiting; their responses will never arrive. Only
     // the current generation may clean up shared state.
     if shared.generation.load(std::sync::atomic::Ordering::Relaxed) == generation {
+        shared.speaking.store(false, Ordering::SeqCst);
         *shared.writer.lock().expect("writer lock") = None;
         {
             let mut pending = shared.pending.lock().expect("pending lock");
@@ -475,6 +497,14 @@ fn dispatch(shared: &Shared, text: &str) {
     let Ok(response) = serde_json::from_str::<Value>(text) else {
         return;
     };
+    if let Some(alice_state) = response
+        .pointer("/state/aliceState")
+        .and_then(Value::as_str)
+    {
+        shared
+            .speaking
+            .store(alice_state == "SPEAKING", Ordering::SeqCst);
+    }
     let Some(request_id) = response.get("requestId").and_then(Value::as_str) else {
         return;
     };
@@ -645,6 +675,22 @@ mod tests {
         server.send(Message::text(text)).await.expect("mock send");
     }
 
+    async fn state_barrier(server: &mut MockWs) {
+        server
+            .send(Message::Ping(b"state".to_vec().into()))
+            .await
+            .expect("ping");
+        loop {
+            match server.next().await {
+                Some(Ok(Message::Pong(payload))) if &payload[..] == b"state" => break,
+                Some(Ok(Message::Ping(payload))) => {
+                    server.send(Message::Pong(payload)).await.expect("pong")
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+    }
+
     fn say_envelope(phrase: &str) -> Value {
         json!({
             "command": "serverAction",
@@ -688,6 +734,57 @@ mod tests {
             handle.await.expect("say task").expect("say ok")["result"],
             "ok"
         );
+        client.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn speaking_rejects_say_until_state_changes() {
+        let (client, mut server) = client_and_mock(DEFAULT_TIMEOUT, DEFAULT_PING_INTERVAL).await;
+        send_text(&mut server, r#"{"state":{"aliceState":"SPEAKING"}}"#).await;
+        state_barrier(&mut server).await;
+        assert_eq!(client.say("blocked").await, Err(GlagolError::Speaking));
+
+        // Unrelated and malformed state messages must not clear SPEAKING.
+        send_text(&mut server, r#"{"state":{"volume":0.5}}"#).await;
+        send_text(&mut server, r#"{"state":{"aliceState":null}}"#).await;
+        state_barrier(&mut server).await;
+        assert_eq!(
+            client.say("still blocked").await,
+            Err(GlagolError::Speaking)
+        );
+
+        send_text(&mut server, r#"{"state":{"aliceState":"IDLE"}}"#).await;
+        state_barrier(&mut server).await;
+        let say = tokio::spawn({
+            let client = client.clone();
+            async move { client.say("allowed").await }
+        });
+        let envelope = next_text(&mut server).await;
+        assert_eq!(envelope["payload"], say_envelope("allowed"));
+        send_text(
+            &mut server,
+            &json!({"requestId": envelope["id"], "status": "SUCCESS"}).to_string(),
+        )
+        .await;
+        say.await.expect("task").expect("say succeeded");
+        client.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn concurrent_say_is_rejected_while_first_is_pending() {
+        let (client, mut server) = client_and_mock(DEFAULT_TIMEOUT, DEFAULT_PING_INTERVAL).await;
+        let first = tokio::spawn({
+            let client = client.clone();
+            async move { client.say("first").await }
+        });
+        let envelope = next_text(&mut server).await;
+        assert_eq!(client.say("second").await, Err(GlagolError::Speaking));
+        send_text(
+            &mut server,
+            &json!({"requestId": envelope["id"]}).to_string(),
+        )
+        .await;
+        first.await.expect("task").expect("first succeeded");
         client.close().await.expect("close");
     }
 

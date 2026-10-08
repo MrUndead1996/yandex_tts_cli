@@ -42,6 +42,9 @@ pub enum ManagerError {
     /// The manager is configured with invalid intervals.
     #[error("retry and refresh intervals must be positive")]
     InvalidConfig,
+    /// Alice is speaking or a say request is already in flight.
+    #[error("Station is speaking")]
+    Speaking,
     /// The underlying Glagol exchange failed.
     #[error(transparent)]
     Glagol(#[from] GlagolError),
@@ -89,6 +92,10 @@ impl GlagolConnection for GlagolClient {
 
     async fn send(&self, payload: Value) -> Result<Value, GlagolError> {
         GlagolClient::send(self, payload).await
+    }
+
+    async fn say(&self, phrase: &str) -> Result<Value, GlagolError> {
+        GlagolClient::say(self, phrase).await
     }
 
     async fn close(&self) -> Result<(), GlagolError> {
@@ -394,7 +401,10 @@ impl<T: TokenSource, D: GlagolDialer> ConnectionManager<T, D> {
         let client = self.wait_ready(timeout).await?;
         let result = GlagolConnection::say(&*client, phrase).await;
         self.after_result(&result);
-        result.map_err(ManagerError::from)
+        result.map_err(|error| match error {
+            GlagolError::Speaking => ManagerError::Speaking,
+            other => ManagerError::Glagol(other),
+        })
     }
 
     /// A failed command leaves the outcome unknown: mark the connection for
@@ -610,10 +620,11 @@ impl<T: TokenSource, D: GlagolDialer> Station for ConnectionManager<T, D> {
 
     async fn say(&self, text: &str) -> Result<(), StationError> {
         // The daemon's request handler bounds the readiness wait with its
-        // own timeout; any failure surfaces as `station_not_connected` and
-        // the command is never replayed. A correlated response that carries
+        // own timeout; connection failures surface as `station_not_connected`
+        // and the command is never replayed. A correlated response that carries
         // an explicit Station-side failure is also not a success.
         match ConnectionManager::say(self, text).await {
+            Err(ManagerError::Speaking) => Err(StationError::Speaking),
             Ok(response) if say_response_accepted(&response) => Ok(()),
             Ok(response) => {
                 if std::env::var_os("YANDEX_TTS_DIAGNOSTICS").is_some() {
@@ -646,6 +657,7 @@ impl<T: TokenSource, D: GlagolDialer> Station for ConnectionManager<T, D> {
                         ManagerError::Closed => "closed",
                         ManagerError::Timeout => "readiness_timeout",
                         ManagerError::InvalidConfig => "invalid_config",
+                        ManagerError::Speaking => "speaking",
                         ManagerError::Glagol(GlagolError::Timeout) => "response_timeout",
                         ManagerError::Glagol(_) => "connection_failed",
                     };

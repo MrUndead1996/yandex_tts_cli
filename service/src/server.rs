@@ -293,6 +293,7 @@ async fn handle_client<S: Station>(
                     }
                     Ok(Ok(response)) => response,
                     Ok(Err(StationError::NotConnected)) => Response::error("station_not_connected"),
+                    Ok(Err(StationError::Speaking)) => Response::error("station_speaking"),
                     Ok(Err(StationError::Internal(kind))) => {
                         log::error!("Request failed ({kind})");
                         Response::error("internal_error")

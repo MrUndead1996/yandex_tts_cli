@@ -12,6 +12,8 @@ use std::future::Future;
 pub enum StationError {
     /// The station link is down or the command was not confirmed.
     NotConnected,
+    /// Alice is speaking or another say request is in flight.
+    Speaking,
     /// Unexpected backend failure; reported to clients as `internal_error`
     /// without leaking details.
     Internal(&'static str),
