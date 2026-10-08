@@ -5,7 +5,7 @@ schema = "openclaw-skill/v1"
 
 [skill]
 name = "yandex-station-tts"
-version = "0.1.0"
+version = "0.2.0"
 description = "Озвучивай текст на Яндекс Станции через локальный CLI только по явной просьбе пользователя сказать или произнести его вслух."
 
 [install]

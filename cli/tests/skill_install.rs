@@ -36,7 +36,7 @@ fn skill_install_writes_manifest_and_rendered_skill_into_root() {
 
     let manifest = std::fs::read_to_string(skill_dir(root.path()).join("SKILL.toml")).unwrap();
     assert!(manifest.contains("name = \"yandex-station-tts\""));
-    assert!(manifest.contains("version = \"0.1.0\""));
+    assert!(manifest.contains("version = \"0.2.0\""));
     assert!(manifest.contains("template = \"SKILL.md\""));
 
     let skill = read_skill_md(root.path());
