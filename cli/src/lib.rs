@@ -78,7 +78,10 @@ fn run(command: &Command, socket: &Path) -> Result<(), String> {
     use yandex_tts_protocol::Response;
     match (command, response) {
         // Each command accepts only its own success shape.
-        (Command::Say(_), Response::Ok) => Ok(()),
+        (Command::Say(_), Response::Ok) => {
+            println!("{}", serde_json::json!({"ok": true}));
+            Ok(())
+        }
         (Command::Ping, Response::Connected(connected)) => {
             println!(
                 "{}",

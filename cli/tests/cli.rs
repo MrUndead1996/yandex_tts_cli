@@ -98,7 +98,11 @@ fn say_succeeds_only_on_ok_response() {
     let daemon = MockDaemon::spawn("{}", "{\"ok\": true}\n");
     let output = run_cli(&daemon, &["say", "Привет"]);
     assert!(output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "{\"ok\":true}"
+    );
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
